@@ -1,7 +1,10 @@
 # USRP DQPSK 多进程系统
 
-这是一个基于USRP硬件的DQPSK (Differential Quadrature Phase Shift Keying) 多进程收发系统，支持实时信号处理、同步和可视化。
+**版本**: v1.0.0  
+**作者**: shengyu@hust.edu.cn
 
+这是一个基于USRP硬件的DQPSK (Differential Quadrature Phase Shift Keying) 多进程收发系统，支持实时信号处理、同步和可视化。
+但是目前还是有问题，解调不出结果
 ## 程序功能
 
 - **信号收发**：通过USRP设备进行DQPSK信号的发射和接收
@@ -9,7 +12,7 @@
 - **差分解调**：DQPSK信号的差分解码算法
 - **可视化监控**：实时显示星座图、时域波形和频谱
 - **多进程架构**：各组件独立运行，提高系统稳定性和性能
-- **多通信模式**：支持UDP、Queue、Pipe和文件IPC
+- **UDP通信**：使用UDP Socket进行进程间数据传输
 
 ## 主要流程
 
@@ -27,52 +30,22 @@
    - 解调DQPSK信号并提取比特
    - 实时更新GUI显示
 
-4. **协调流程**：
-   - 统一启动和管理所有进程
-   - 处理进程间通信和参数传递
+4. **处理流程**：
+   - 累积接收数据进行同步处理
+   - 执行频率偏移校正和相位跟踪
+   - 解调DQPSK信号并提取比特
+   - 实时更新GUI显示
 
 ## 通信方式
 
-系统支持多种进程间通信方式，按性能和兼容性排序：
+系统使用UDP通信进行进程间通信：
 
-### 1. Queue IPC（推荐，高性能）
-- **机制**：使用multiprocessing.Queue进行内存共享
-- **优势**：最低延迟(<1ms)，最高性能，无序列化开销
-- **适用场景**：高性能应用，实时处理
-
-### 2. UDP通信（推荐，跨平台）
+### UDP通信（推荐，跨平台）
 - **机制**：网络协议，Socket通信
 - **优势**：跨平台兼容，异步通信，无文件I/O
 - **数据格式**：[4字节长度前缀] + [Pickle序列化数据]
 
-### 3. Pipe IPC
-- **机制**：操作系统管道通信
-- **优势**：高效，无文件锁，内置同步
-- **适用场景**：Linux环境
-
-### 4. 文件IPC（向后兼容）
-- **机制**：文件共享，Pickle序列化
-- **优势**：简单实现，兼容性好
-- **劣势**：文件I/O开销，锁竞争
-
 ## 启动方案
-
-### 方案1：主协调器启动（推荐）
-
-使用主协调器统一管理所有进程：
-
-```bash
-# UDP模式（默认推荐）
-python main_coordinator.py --tx_freq 900e6 --rx_freq 900e6 --rate 1e6 --tx_gain 50 --rx_gain 50
-
-# Queue模式（高性能）
-python main_coordinator.py --use_queue --tx_freq 900e6 --rx_freq 900e6 --rate 1e6 --tx_gain 50 --rx_gain 50
-
-# 自定义UDP端口
-python main_coordinator.py --udp_port 12345 --udp_host 127.0.0.1 --tx_freq 900e6 --rx_freq 900e6 --rate 1e6 --tx_gain 50 --rx_gain 50
-```
-
-### 方案2：分别启动各程序
 
 分别在不同终端启动各组件：
 
@@ -81,10 +54,10 @@ python main_coordinator.py --udp_port 12345 --udp_host 127.0.0.1 --tx_freq 900e6
 python tx_program.py --tx_freq 900e6 --rate 1e6 --tx_gain 50
 
 # 终端2：接收程序
-python rx_program.py --rx_freq 900e6 --rate 1e6 --rx_gain 50 --udp_port 12345
+python rx_program.py --rx_freq 900e6 --rate 1e6 --rx_gain 50 --udp_host 127.0.0.1 --udp_port 12345
 
 # 终端3：处理程序
-python processing_program.py --rate 1e6 --udp_port 12345
+python processing_program.py --rate 1e6 --udp_host 127.0.0.1 --udp_port 12345
 ```
 
 ## 参数说明
@@ -101,13 +74,11 @@ python processing_program.py --rate 1e6 --udp_port 12345
 - `--rx_gain`：接收增益 (dB)，默认30
 
 ### 处理程序参数
-- `--output_file`：解调比特输出文件，默认"demodulated_bits.txt"
+- 解调结果直接打印到控制台（前100个bit）
 
 ### 通信参数
 - `--udp_port`：UDP端口，默认自动分配
 - `--udp_host`：UDP主机地址，默认127.0.0.1
-- `--use_queue`：启用Queue IPC模式
-- `--ipc_file`：文件IPC文件名，默认"rx_to_proc.pkl"
 
 ## 系统要求
 
@@ -121,17 +92,16 @@ python processing_program.py --rate 1e6 --udp_port 12345
 pip install numpy scipy pyqt5 pyqtgraph uhd
 ```
 
-## 输出文件
+## 输出
 
-- `demodulated_bits.txt`：解调后的比特数据
-- 实时GUI显示：星座图、时域波形和频谱
+- **控制台输出**：解调后的比特数据直接打印到控制台（每帧前100个bit）
+- **实时GUI显示**：星座图、时域波形和频谱
 
 ## 故障排除
 
 1. **同步失败**：检查信号强度、频率设置和增益参数
 2. **通信失败**：确认端口未被占用，检查防火墙设置
 3. **GUI不显示**：确保安装了PyQt5和pyqtgraph
-4. **性能问题**：尝试Queue模式或调整缓冲区大小
 
 ---
 

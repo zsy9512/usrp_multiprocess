@@ -242,34 +242,12 @@ class ProcessingProgram:
         self.processing_queue = queue.Queue(maxsize=1000)  # 从20增加到1000
 
         # IPC相关
-        self.use_pipe = args.use_pipe.lower() == 'true'
-        self.use_queue = getattr(args, 'use_queue', False)
         self.udp_host = args.udp_host
         self.udp_port = args.udp_port
         self.udp_socket = None
-        self.queue_conn = None
 
-        if self.use_queue:
-            # 使用Queue模式 - 简化实现，直接使用UDP作为替代
-            print("Queue模式启用，使用UDP作为通信方式")
-            self._init_udp()
-        elif self.use_pipe:
-            # 使用Pipe模式，从环境变量获取文件描述符
-            try:
-                pipe_fd = int(os.environ.get('PIPE_FD', '3'))
-                import multiprocessing.connection
-                self.pipe_conn = multiprocessing.connection.Connection(os.dup(pipe_fd))
-                print("Pipe IPC模式已启用")
-            except Exception as e:
-                print(f"Pipe连接失败: {e}，回退到UDP模式")
-                self.use_pipe = False
-                self._init_udp()
-        else:
-            # 使用UDP模式
-            self._init_udp()
-            self.ipc_file = args.ipc_file
-            self.file_lock = threading.Lock()
-            self.pipe_conn = None
+        # 使用UDP模式
+        self._init_udp()
 
     def _init_udp(self):
         """初始化UDP通信"""
@@ -309,32 +287,12 @@ class ProcessingProgram:
         self.gui_thread = None
 
     def ipc_receive_thread_func(self):
-        """IPC接收线程：从UDP/Pipe/文件接收数据"""
-        if self.use_pipe:
-            print("Pipe IPC接收线程启动")
-        elif self.udp_socket:
-            print("UDP IPC接收线程启动")
-        else:
-            print("文件IPC接收线程启动")
+        """IPC接收线程：从UDP接收数据"""
+        print("UDP IPC接收线程启动")
 
         while self.running.is_set():
             try:
-                if self.use_pipe and self.pipe_conn:
-                    # 从Pipe接收数据
-                    try:
-                        if self.pipe_conn.poll(timeout=0.01):  # 非阻塞检查
-                            samples = self.pipe_conn.recv()
-                            print(f"Pipe接收: 数据块大小 {len(samples)}")
-
-                            # 放入处理队列
-                            try:
-                                self.processing_queue.put(samples, timeout=1.0)
-                            except queue.Full:
-                                print("处理队列已满，丢弃数据块")
-                    except Exception as e:
-                        print(f"Pipe接收错误: {str(e)}")
-                        time.sleep(0.1)
-                elif self.udp_socket:
+                if self.udp_socket:
                     # 从UDP接收数据
                     try:
                         data, addr = self.udp_socket.recvfrom(65536)  # 64KB缓冲区
@@ -361,42 +319,10 @@ class ProcessingProgram:
                     except Exception as e:
                         print(f"UDP接收错误: {str(e)}")
                         time.sleep(0.01)
-                else:
-                    # 从文件读取数据
-                    if os.path.exists(self.ipc_file):
-                        try:
-                            with self.file_lock:
-                                with open(self.ipc_file, 'rb') as f:
-                                    samples = pickle.load(f)
-                                # 删除文件以避免重复读取
-                                os.remove(self.ipc_file)
-
-                            print(f"文件IPC接收: 数据块大小 {len(samples)}")
-
-                            # 放入处理队列
-                            try:
-                                self.processing_queue.put(samples, timeout=1.0)
-                            except queue.Full:
-                                print("处理队列已满，丢弃数据块")
-
-                        except (FileNotFoundError, EOFError, pickle.UnpicklingError):
-                            # 文件不存在或损坏，继续等待
-                            pass
-                        except Exception as e:
-                            print(f"IPC文件读取错误: {str(e)}")
-
-                    time.sleep(0.01)
 
             except Exception as e:
                 print(f"IPC接收线程错误: {str(e)}")
                 time.sleep(0.1)
-
-        if self.use_pipe and self.pipe_conn:
-            try:
-                self.pipe_conn.close()
-                print("Pipe连接已关闭")
-            except:
-                pass
 
         if self.udp_socket:
             try:
@@ -527,8 +453,8 @@ class ProcessingProgram:
             # 9. 符号到比特转换
             recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
 
-            # 10. 保存解调结果
-            self._save_demodulated_bits(recv_bits)
+            # 10. 打印前100个解调比特
+            print(f"帧 {self.total_processed_frames + 1} 解调结果: {''.join(map(str, recv_bits[:100].astype(int)))}")
 
             # 11. 更新GUI数据
             gui_data = {
@@ -552,15 +478,6 @@ class ProcessingProgram:
             import traceback
             traceback.print_exc()
             return False
-
-    def _save_demodulated_bits(self, bits):
-        """保存解调的比特到文件"""
-        try:
-            with open(self.args.output_file, 'a') as f:
-                bit_str = ''.join(map(str, bits.astype(int)))
-                f.write(bit_str + '\n')
-        except Exception as e:
-            print(f"保存比特错误: {str(e)}")
 
     def _update_gui_data(self, gui_data):
         """更新GUI显示数据"""
@@ -677,10 +594,6 @@ class ProcessingProgram:
 def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK处理程序")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--output_file", type=str, default="demodulated_bits.txt", help="解调比特输出文件")
-    parser.add_argument("--ipc_file", type=str, default="rx_to_proc.pkl", help="IPC文件路径（文件模式）")
-    parser.add_argument("--use_pipe", type=str, default="false", help="是否使用Pipe IPC（true/false）")
-    parser.add_argument("--use_queue", action="store_true", help="是否使用Queue IPC")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
 

@@ -8,6 +8,7 @@ from dqpsk_system import USRP_DQPSK_System
 
 def generate_bits(mode="random", num_bits=1000):
     """生成比特数据，支持不同模式"""
+    np.random.seed(42)
     if mode == "random":
         return np.random.randint(0, 2, num_bits)
     elif mode == "zeros":
@@ -48,6 +49,9 @@ class TXProgram:
         # 线程
         self.data_generation_thread = None
         self.tx_thread = None
+        
+        # 当前发射比特（用于BER计算）
+        self.current_tx_bits = None
 
     def _init_usrp(self):
         """初始化USRP设备"""
@@ -59,10 +63,15 @@ class TXProgram:
             self.usrp.set_tx_freq(uhd.types.TuneRequest(self.args.tx_freq))
             self.usrp.set_tx_gain(self.args.tx_gain)
             self.usrp.set_tx_rate(self.args.rate)
-
+            # 配置时钟和时序
+            self.usrp.set_clock_source("internal")
+            self.usrp.set_time_source("internal")
+            pc_time_sec = time.time()
+            uhd_time = uhd.types.TimeSpec(pc_time_sec)
+            self.usrp.set_time_now(uhd_time)
             print(f"USRP发射初始化完成: 频率={self.args.tx_freq/1e6:.1f}MHz, 增益={self.args.tx_gain}dB")
 
-            # 创建发射流
+            # 创建发射流a
             tx_st_args = uhd.usrp.StreamArgs("fc32", "sc16")
             tx_st_args.channels = [0]
             self.tx_streamer = self.usrp.get_tx_stream(tx_st_args)
@@ -81,7 +90,9 @@ class TXProgram:
             try:
                 # 生成比特
                 bits = generate_bits(self.args.bit_generator, self.qpsk_system.data_bits)
-
+                
+                # 保存当前发射比特
+                self.current_tx_bits = bits.copy()
                 # 生成帧
                 frame = self.qpsk_system.generate_frame()
 
@@ -89,20 +100,16 @@ class TXProgram:
                 tx_signal = self.qpsk_system.prepare_tx_signal(frame)
 
                 # 放入队列
-                self.tx_buffer_queue.put(tx_signal, timeout=1.0)
-
-                if self.tx_buffer_queue.qsize() % 10 == 0:
-                    print(f"已生成 {self.tx_buffer_queue.qsize()} 个帧")
-
+                self.tx_buffer_queue.put(tx_signal, timeout=0.1)
                 # 生产间隔
-                time.sleep(0.1)  # 100ms间隔
+                time.sleep(0.5)  # 100ms间隔
 
             except queue.Full:
                 print("发射缓冲区已满，等待消费...")
                 time.sleep(0.05)
             except Exception as e:
                 print(f"数据生成错误: {str(e)}")
-                time.sleep(0.1)
+                time.sleep(0.5)
 
         print("数据生成线程结束")
 
@@ -141,8 +148,8 @@ class TXProgram:
 
                 frame_count += 1
 
-                if frame_count % 50 == 0:
-                    print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
+                #if frame_count % 50 == 0:
+                print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
 
                 # 发送间隔
                 time.sleep(0.01)  # 10ms检测间隔
@@ -209,7 +216,7 @@ def main():
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--tx_gain", type=float, default=50, help="发射增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210", help="USRP设备参数")
-    parser.add_argument("--repeat_count", type=int, default=10, help="每个帧重复发送次数")
+    parser.add_argument("--repeat_count", type=int, default=5, help="每个帧重复发送次数")
     parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式")
 
     args = parser.parse_args()

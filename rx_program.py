@@ -35,34 +35,12 @@ class RXProgram:
         self.large_pool_queue = collections.deque(maxlen=args.buffer_size)
 
         # IPC相关
-        self.use_pipe = args.use_pipe.lower() == 'true'
-        self.use_queue = getattr(args, 'use_queue', False)
         self.udp_host = args.udp_host
         self.udp_port = args.udp_port
         self.udp_socket = None
-        self.queue_conn = None
 
-        if self.use_queue:
-            # 使用Queue模式 - 简化实现，直接使用UDP作为替代
-            print("Queue模式启用，使用UDP作为通信方式")
-            self._init_udp()
-        elif self.use_pipe:
-            # 使用Pipe模式
-            try:
-                pipe_fd = int(os.environ.get('PIPE_FD', '3'))
-                import multiprocessing.connection
-                self.pipe_conn = multiprocessing.connection.Connection(os.dup(pipe_fd))
-                print("Pipe IPC模式已启用")
-            except Exception as e:
-                print(f"Pipe连接失败: {e}，回退到UDP模式")
-                self.use_pipe = False
-                self._init_udp()
-        else:
-            # 使用UDP模式
-            self._init_udp()
-            self.ipc_file = args.ipc_file
-            self.file_lock = threading.Lock()
-            self.pipe_conn = None
+        # 使用UDP模式
+        self._init_udp()
 
     def _init_udp(self):
         """初始化UDP通信"""
@@ -94,6 +72,11 @@ class RXProgram:
             self.usrp = uhd.usrp.MultiUSRP(self.args.args)
 
             # 配置参数
+            self.usrp.set_clock_source("internal")
+            self.usrp.set_time_source("internal")
+            pc_time_sec = time.time()
+            uhd_time = uhd.types.TimeSpec(pc_time_sec)
+            self.usrp.set_time_now(uhd_time)
             self.usrp.set_rx_freq(uhd.types.TuneRequest(self.args.rx_freq))
             self.usrp.set_rx_gain(self.args.rx_gain)
             self.usrp.set_rx_rate(self.args.rate)
@@ -185,11 +168,8 @@ class RXProgram:
         print("接收线程结束")
 
     def ipc_send_thread_func(self):
-        """IPC发送线程：异步从缓冲区取数据，通过UDP/Pipe/文件发送"""
-        if self.use_pipe:
-            print("Pipe IPC发送线程启动")
-        else:
-            print("UDP IPC发送线程启动")
+        """IPC发送线程：异步从缓冲区取数据，通过UDP发送"""
+        print("UDP IPC发送线程启动")
 
         while self.running.is_set():
             try:
@@ -197,16 +177,7 @@ class RXProgram:
                     # 从缓冲区取数据
                     samples = self.large_pool_queue.popleft()
 
-                    if self.use_pipe and self.pipe_conn:
-                        # 使用Pipe发送
-                        try:
-                            self.pipe_conn.send(samples)
-                            print(f"Pipe发送: 数据块大小 {len(samples)}")
-                        except Exception as e:
-                            print(f"Pipe发送错误: {str(e)}")
-                            # 重新放回缓冲区
-                            self.large_pool_queue.appendleft(samples)
-                    elif self.udp_socket:
+                    if self.udp_socket:
                         # 使用UDP发送
                         try:
                             # 将numpy数组序列化为bytes
@@ -221,30 +192,12 @@ class RXProgram:
                             print(f"UDP发送错误: {str(e)}")
                             # 重新放回缓冲区
                             self.large_pool_queue.appendleft(samples)
-                    else:
-                        # 使用文件IPC发送
-                        try:
-                            with self.file_lock:
-                                with open(self.ipc_file, 'wb') as f:
-                                    pickle.dump(samples, f)
-                            print(f"文件IPC发送: 数据块大小 {len(samples)}")
-                        except Exception as e:
-                            print(f"文件IPC发送错误: {str(e)}")
-                            # 重新放回缓冲区
-                            self.large_pool_queue.appendleft(samples)
 
                 time.sleep(0.01)  # 10ms发送间隔
 
             except Exception as e:
                 print(f"IPC发送线程错误: {str(e)}")
                 time.sleep(0.1)
-
-        if self.use_pipe and self.pipe_conn:
-            try:
-                self.pipe_conn.close()
-                print("Pipe连接已关闭")
-            except:
-                pass
 
         if self.udp_socket:
             try:
@@ -309,12 +262,9 @@ def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK接收程序")
     parser.add_argument("--rx_freq", type=float, default=900e6, help="接收频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--rx_gain", type=float, default=50, help="接收增益 (dB)")
+    parser.add_argument("--rx_gain", type=float, default=40, help="接收增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210_01", help="USRP设备参数")
     parser.add_argument("--buffer_size", type=int, default=1000, help="接收缓冲区大小")
-    parser.add_argument("--ipc_file", type=str, default="rx_to_proc.pkl", help="IPC文件路径（文件模式）")
-    parser.add_argument("--use_pipe", type=str, default="false", help="是否使用Pipe IPC（true/false）")
-    parser.add_argument("--use_queue", action="store_true", help="是否使用Queue IPC")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
 
