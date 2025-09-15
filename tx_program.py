@@ -102,7 +102,7 @@ class TXProgram:
                 # 放入队列
                 self.tx_buffer_queue.put(tx_signal, timeout=0.1)
                 # 生产间隔
-                time.sleep(0.5)  # 100ms间隔
+                time.sleep(0.2)  # 100ms间隔
 
             except queue.Full:
                 print("发射缓冲区已满，等待消费...")
@@ -152,7 +152,7 @@ class TXProgram:
                 print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
 
                 # 发送间隔
-                time.sleep(0.01)  # 10ms检测间隔
+                #time.sleep(0.001)  # 10ms检测间隔
 
             except queue.Empty:
                 continue
@@ -189,7 +189,7 @@ class TXProgram:
 
         try:
             while self.running.is_set():
-                time.sleep(1)
+                time.sleep(0.001)
         except KeyboardInterrupt:
             print("\n收到停止信号...")
 

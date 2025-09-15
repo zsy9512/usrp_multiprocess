@@ -129,11 +129,9 @@ class RXProgram:
                         signal_power = np.mean(np.abs(samples[::step])**2)
 
                         # 功率阈值判断
-                        if signal_power < 0.01:
+                        if signal_power < 0.2:
                             self.noise_discard_count += 1
-                            monitor_count += 1
-                            if monitor_count % 1000 == 0:
-                                print(f"噪声抛弃: 功率 {signal_power:.6f}, 累计 {self.noise_discard_count}")
+                            
                             continue
 
                         # 有效信号，放入缓冲区
@@ -142,9 +140,8 @@ class RXProgram:
                             if len(self.large_pool_queue) >= self.args.buffer_size:
                                 # 缓冲区满时，移除最旧的数据
                                 self.large_pool_queue.popleft()
-
-                            if monitor_count % 100 == 0:
-                                print(f"接收调试: 信号功率 {signal_power:.6f}, 队列大小 {len(self.large_pool_queue)}")
+                            #monitor_count += 1
+                            #print(f"接收调试: 收到数据{monitor_count:d}, 数据块大小 {len(samples)}, 信号功率 {signal_power:.6f}, 队列大小 {len(self.large_pool_queue)}")
 
                         except Exception as e:
                             self.overflow_count += 1
@@ -235,9 +232,9 @@ class RXProgram:
 
         try:
             while self.running.is_set():
-                time.sleep(1)
+                time.sleep(0.001)
                 # 打印统计信息
-                print(f"统计: 接收样本 {self.rx_samples_received}, 噪声丢弃 {self.noise_discard_count}, 队列大小 {len(self.large_pool_queue)}")
+                #print(f"统计: 接收样本 {self.rx_samples_received}, 噪声丢弃 {self.noise_discard_count}, 队列大小 {len(self.large_pool_queue)}")
         except KeyboardInterrupt:
             print("\n收到停止信号...")
 
@@ -262,7 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK接收程序")
     parser.add_argument("--rx_freq", type=float, default=900e6, help="接收频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--rx_gain", type=float, default=40, help="接收增益 (dB)")
+    parser.add_argument("--rx_gain", type=float, default=50, help="接收增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210_01", help="USRP设备参数")
     parser.add_argument("--buffer_size", type=int, default=1000, help="接收缓冲区大小")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
