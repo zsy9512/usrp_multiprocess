@@ -4,6 +4,116 @@
 **作者**: shengyu@hust.edu.cn
 
 这是一个基于USRP硬件的DQPSK (Differential Quadrature Phase Shift Keying) 多进程收发系统，支持实时信号处理、同步和可视化。
+
+## 🎯 快速开始
+
+### 🚀 一键启动实验（推荐）
+```bash
+# Windows用户：双击运行
+start_experiment.bat
+
+# 或命令行运行
+python start_experiment.py --mode simulation
+```
+
+### 📖 完整实验指南
+- **快速开始**: `QUICK_START.md`
+- **详细指南**: `EXPERIMENT_GUIDE.md`
+- **测试报告**: `TEST_REPORT.md`
+
+### 🧪 手动启动（4个终端）
+```bash
+# 终端1：队列服务器
+python queue_server.py --host 127.0.0.1 --port 50000
+
+# 终端2：处理程序（GUI）
+python processing_program.py --mode simulation --ipc_mode queue
+
+# 终端3：接收程序
+python rx_program.py --mode simulation --ipc_mode queue
+
+# 终端4：发射程序
+python tx_program.py --mode simulation --ipc_mode queue
+```
+
+## 📁 项目文件结构
+
+```
+usrp_multiprocess/
+├── 📄 README.md              # 项目说明
+├── 📄 QUICK_START.md         # 快速开始指南
+├── 📄 EXPERIMENT_GUIDE.md    # 详细实验指南
+├── 📄 TEST_REPORT.md         # 测试报告
+├── 🖥️  start_experiment.bat   # Windows一键启动
+├── 🐍 start_experiment.py    # Python启动脚本
+├── 🐍 demo_experiment.py     # 演示脚本
+├── 🧪 test_simulation.py     # 基础测试
+├── 🧪 comprehensive_test.py  # 全面测试
+├── 📊 dqpsk_test_results.png # 测试结果图表
+├── 🐍 dqpsk_system.py        # 核心系统
+├── 🐍 simulation_manager.py  # 仿真管理器
+├── 📡 tx_program.py          # 发射程序
+├── 📡 rx_program.py          # 接收程序
+├── 📊 processing_program.py  # 处理程序（GUI）
+└── 🔗 queue_server.py       # 队列服务器
+```
+
+## 🎯 实验流程
+
+1. **数据生成** → 发射程序连续生成DQPSK帧
+2. **信号发送** → 通过USRP硬件或仿真信道发送
+3. **信号接收** → 接收端捕获并初步处理
+4. **数据处理** → 同步、解调、解码
+5. **实时显示** → GUI显示星座图、波形、频谱
+
+## 📊 实时监控
+
+启动实验后，您将看到专业的监控界面：
+
+### GUI界面组件
+- **星座图**：实时显示解调符号（应聚集在理想位置）
+- **时域波形**：显示接收信号的时域特性
+- **频谱分析**：显示信号的频率成分
+- **状态信息**：BER、SNR、同步状态、帧计数
+
+### 性能指标
+- **BER**：< 1e-3（理想）
+- **吞吐量**：> 100 帧/秒
+- **同步成功率**：> 95%
+- **延迟**：< 50ms
+
+## 🚀 快速开始
+
+### 仿真模式测试（推荐新用户）
+如果您没有USRP硬件或想快速验证系统功能，请先运行仿真模式：
+
+```bash
+# 运行自动化测试
+python test_simulation.py
+```
+
+**测试结果示例**:
+```
+==================================================
+测试1: 直接同步模式
+==================================================
+测试参数 1: {'snr_db': 15, 'freq_offset': 0, 'phase_offset': 0}
+平均BER: 0.00e+00
+处理时间: 0.010s
+...
+============================================================
+测试总结报告
+============================================================
+✓ 直接同步测试: 通过
+✓ IPC仿真测试: 通过
+✓ 对比测试: 通过
+✓ 帧生成测试: 通过
+
+所有测试完成！仿真系统运行正常。
+```
+
+### 硬件模式（需要USRP设备）
+如果您有USRP硬件，请参考下面的完整说明。
 ## 程序功能
 
 - **信号收发**：通过USRP设备进行DQPSK信号的发射和接收

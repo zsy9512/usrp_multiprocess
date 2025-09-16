@@ -14,6 +14,7 @@ import sys
 import multiprocessing
 from multiprocessing.managers import BaseManager
 from dqpsk_system import USRP_DQPSK_System, EnhancedCostasLoop
+from simulation_manager import SimulationManager, SimulationIPC
 
 # PyQt5 GUI imports
 try:
@@ -59,8 +60,8 @@ class DQPSKMonitor(QMainWindow):
         self.constellation_plot.showGrid(x=True, y=True, alpha=0.3)
         self.constellation_plot.setLabel('left', 'Quadrature')
         self.constellation_plot.setLabel('bottom', 'In-phase')
-        self.constellation_plot.setXRange(-1.5, 1.5)
-        self.constellation_plot.setYRange(-1.5, 1.5)
+        self.constellation_plot.setXRange(-2.5, 2.5)
+        self.constellation_plot.setYRange(-2.5, 2.5)
         self.constellation_plot.setAspectLocked(True)
 
         # 创建星座图散点
@@ -92,8 +93,8 @@ class DQPSKMonitor(QMainWindow):
         self.time_plot.showGrid(x=True, y=True, alpha=0.3)
         self.time_plot.setLabel('left', 'Amplitude')
         self.time_plot.setLabel('bottom', 'Sample')
-        self.time_plot.setXRange(0, 500)
-        self.time_plot.setYRange(-1.2, 1.2)  # 固定纵坐标范围
+        self.time_plot.setXRange(0, 2500)
+        self.time_plot.setYRange(-1.5, 1.52)  # 固定纵坐标范围
 
         # 创建时域波形曲线
         self.time_curve = self.time_plot.plot(pen=pg.mkPen('b', width=2))
@@ -222,25 +223,27 @@ class GUIManager(QObject):
         self.running = False
 
 class ProcessingProgram:
-    """同步处理程序：从文件接收数据，进行同步解调，显示结果"""
+    """同步处理程序：从IPC接收数据，进行同步解调，显示结果，支持硬件和仿真模式"""
 
     def __init__(self, args):
         self.args = args
         self.running = threading.Event()
 
+        # 检测运行模式
+        self.mode = getattr(args, 'mode', 'hardware')
+
         # 初始化DQPSK系统
         self.qpsk_system = USRP_DQPSK_System(
             mode="simulation",  # 处理程序不需要硬件访问
             center_freq=900e6,
-            samp_rate=args.rate,
+            samp_rate=getattr(args, 'rate', 1e6),
             sps=2,
             roll_off=0.35,
             verbose=True
         )
 
-        # 缓冲区设计 - 大幅增加缓冲区大小
-        self.processing_buffer = np.zeros(100000, dtype=np.complex64)  # 10万样本大缓冲区
-        self.buffer_index = 0  # 缓冲区当前索引
+        # 缓冲区设计 - 简化为帧级缓冲
+        self.frame_buffer = queue.Queue(maxsize=100)  # 帧缓冲区
         self.processing_queue = queue.Queue(maxsize=1000)  # 从20增加到1000
 
         # IPC相关
@@ -249,6 +252,10 @@ class ProcessingProgram:
         self.udp_host = args.udp_host
         self.udp_port = args.udp_port
         self.udp_socket = None
+
+        # 仿真相关
+        self.sim_manager = None
+        self.sim_rx_queue = None
 
         # 根据IPC模式初始化
         if self.ipc_mode == "udp":
@@ -283,6 +290,15 @@ class ProcessingProgram:
         self.processing_thread = None
         self.gui_thread = None
 
+    def set_simulation_manager(self, sim_manager, sim_rx_queue):
+        """设置仿真管理器（仿真模式使用）"""
+        if self.mode == "simulation":
+            self.sim_manager = sim_manager
+            self.sim_rx_queue = sim_rx_queue
+            print("处理程序: 仿真管理器已设置")
+        else:
+            print("警告: 非仿真模式下设置仿真管理器无效")
+
     def set_queue(self, ipc_queue):
         """设置IPC Queue对象（用于Queue模式）"""
         if self.ipc_mode == "queue":
@@ -308,6 +324,19 @@ class ProcessingProgram:
             print(f"UDP初始化失败: {e}")
             raise
 
+    def generate_bits(self, mode="random", num_bits=1000):
+        """生成比特数据，支持不同模式，与发射端保持一致"""
+        np.random.seed(42)  # 使用相同的种子确保一致性
+        if mode == "random":
+            return np.random.randint(0, 2, num_bits)
+        elif mode == "zeros":
+            return np.zeros(num_bits, dtype=int)
+        elif mode == "ones":
+            return np.ones(num_bits, dtype=int)
+        else:
+            # 默认随机
+            return np.random.randint(0, 2, num_bits)
+
         # 统计信息
         self.total_processed_frames = 0
         self.ber_history = []
@@ -318,7 +347,81 @@ class ProcessingProgram:
         self.gui_thread = None
 
     def ipc_receive_thread_func(self):
-        """IPC接收线程：从UDP接收数据"""
+        """IPC接收线程：从UDP或仿真队列接收数据"""
+        print(f"IPC接收线程启动 (模式: {self.mode})")
+
+        if self.mode == "simulation":
+            # 仿真模式接收逻辑
+            self._simulation_receive_thread_func()
+        else:
+            # 硬件模式接收逻辑
+            self._udp_receive_thread_func()
+
+    def _simulation_receive_thread_func(self):
+        """仿真模式接收线程 - 处理完整帧数据包"""
+        if self.sim_rx_queue is None:
+            print("仿真接收线程: sim_rx_queue未设置")
+            return
+
+        print("仿真接收线程: 开始监听仿真队列")
+
+        while self.running.is_set():
+            try:
+                # 从仿真队列接收数据包
+                packet = self.sim_rx_queue.get(timeout=0.1)
+                if packet is None:
+                    continue
+
+                # 提取数据包内容
+                frame_id, tx_signal, rx_signal, tx_bits, timestamp, metadata = SimulationIPC.extract_packet_data(packet)
+
+                # 调试信息
+                print(f"调试: packet类型={type(packet)}, rx_signal类型={type(rx_signal)}")
+                if rx_signal is not None:
+                    print(f"调试: rx_signal形状={rx_signal.shape if hasattr(rx_signal, 'shape') else '无shape'}, 长度={len(rx_signal) if hasattr(rx_signal, '__len__') else '无长度'}")
+
+                if rx_signal is not None and len(rx_signal) > 0:
+                    # 验证rx_signal是有效的numpy数组
+                    if not isinstance(rx_signal, np.ndarray):
+                        print(f"错误: rx_signal不是numpy数组，类型: {type(rx_signal)}")
+                        continue
+
+                    if rx_signal.dtype != np.complex64 and rx_signal.dtype != np.complex128:
+                        print(f"错误: rx_signal数据类型不正确: {rx_signal.dtype}")
+                        continue
+
+                    # 创建帧数据包，包含所有必要信息
+                    frame_packet = {
+                        'frame_id': frame_id,
+                        'rx_signal': rx_signal.copy(),  # 接收信号（已应用信道效应）
+                        'tx_signal': tx_signal.copy() if tx_signal is not None else None,  # 发送信号
+                        'tx_bits': tx_bits.copy() if tx_bits is not None else None,  # 发送比特
+                        'timestamp': timestamp,
+                        'metadata': metadata.copy() if metadata else {}
+                    }
+
+                    # 将完整帧数据包放入处理队列
+                    try:
+                        self.processing_queue.put(frame_packet, timeout=1.0)
+                        print(f"仿真接收: 帧 {frame_id} 数据包大小 {len(rx_signal)} 样本")
+                    except queue.Full:
+                        print("处理队列已满，丢弃帧数据包")
+
+                time.sleep(0.01)
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"仿真接收线程错误: {str(e)}")
+                print(f"错误类型: {type(e).__name__}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+
+        print("仿真接收线程结束")
+
+    def _udp_receive_thread_func(self):
+        """UDP接收线程（原有的硬件模式逻辑）"""
         print("UDP IPC接收线程启动")
 
         while self.running.is_set():
@@ -390,48 +493,30 @@ class ProcessingProgram:
         print("Queue接收线程结束")
 
     def processing_thread_func(self):
-        """处理线程：累积数据后进行完整同步处理"""
-        print(f"处理线程启动: 缓冲区大小 {len(self.processing_buffer)}")
-
-        min_process_samples = 3000  # 最少需要2500样本进行有效同步（略大于一帧1560样本）
-        overlap_samples = 1000  # 重叠样本，避免帧边界问题
+        """处理线程：处理完整的帧数据包或累积的样本数据"""
+        print("处理线程启动: 支持帧数据包和样本数据")
 
         while self.running.is_set():
             try:
-                # 累积数据到缓冲区
-                while self.buffer_index < min_process_samples and not self.processing_queue.empty():
-                    try:
-                        new_samples = self.processing_queue.get(timeout=0.1)
-                        # 复制新数据到缓冲区
-                        copy_size = min(len(new_samples), len(self.processing_buffer) - self.buffer_index)
-                        if copy_size > 0:
-                            self.processing_buffer[self.buffer_index:self.buffer_index + copy_size] = new_samples[:copy_size]
-                            self.buffer_index += copy_size
-                    except queue.Empty:
-                        break
+                # 从处理队列获取数据
+                try:
+                    data = self.processing_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-                # 当有足够数据时进行处理
-                if self.buffer_index >= min_process_samples:
-                    # 处理累积的数据
-                    success = self._process_accumulated_data(min_process_samples)
+                # 检查数据类型
+                if isinstance(data, dict) and 'frame_id' in data:
+                    # 帧数据包模式（仿真模式）
+                    success = self._process_frame_packet(data)
+                elif isinstance(data, np.ndarray):
+                    # 原始样本数据模式（UDP/硬件模式）
+                    success = self._process_raw_samples(data)
+                else:
+                    print(f"未知数据类型: {type(data)}")
+                    success = False
 
-                    if success:
-                        # 处理成功，移动缓冲区窗口，保持重叠
-                        remaining_samples = self.buffer_index - (min_process_samples - overlap_samples)
-                        if remaining_samples > 0:
-                            self.processing_buffer[:remaining_samples] = self.processing_buffer[min_process_samples - overlap_samples:self.buffer_index]
-                            self.buffer_index = remaining_samples
-                        else:
-                            self.buffer_index = 0
-                    else:
-                        # 处理失败，移动小窗口继续尝试
-                        shift_size = min_process_samples // 4
-                        remaining_samples = self.buffer_index - shift_size
-                        if remaining_samples > 0:
-                            self.processing_buffer[:remaining_samples] = self.processing_buffer[shift_size:self.buffer_index]
-                            self.buffer_index = remaining_samples
-                        else:
-                            self.buffer_index = 0
+                if not success:
+                    print("数据处理失败")
 
                 time.sleep(0.01)  # 短暂休眠避免CPU占用过高
 
@@ -441,11 +526,59 @@ class ProcessingProgram:
 
         print("处理线程结束")
 
-    def _process_accumulated_data(self, num_samples):
-        """处理累积的数据块 - 完整的同步解调流程"""
+    def _process_raw_samples(self, samples):
+        """处理原始样本数据（UDP/硬件模式）- 使用滑动窗口方法"""
+        try:
+            # 将新样本添加到缓冲区
+            if not hasattr(self, 'raw_sample_buffer'):
+                self.raw_sample_buffer = np.array([], dtype=np.complex64)
+                self.raw_buffer_index = 0
+
+            # 扩展缓冲区
+            self.raw_sample_buffer = np.append(self.raw_sample_buffer, samples)
+            self.raw_buffer_index += len(samples)
+
+            min_process_samples = 3000  # 最少需要3000样本进行有效同步
+            overlap_samples = 1000  # 重叠样本，避免帧边界问题
+
+            # 当有足够数据时进行处理
+            if self.raw_buffer_index >= min_process_samples:
+                # 处理累积的数据
+                success = self._process_accumulated_samples(min_process_samples)
+
+                if success:
+                    # 处理成功，移动缓冲区窗口，保持重叠
+                    remaining_samples = self.raw_buffer_index - (min_process_samples - overlap_samples)
+                    if remaining_samples > 0:
+                        self.raw_sample_buffer = self.raw_sample_buffer[min_process_samples - overlap_samples:self.raw_buffer_index]
+                        self.raw_buffer_index = remaining_samples
+                    else:
+                        self.raw_sample_buffer = np.array([], dtype=np.complex64)
+                        self.raw_buffer_index = 0
+                else:
+                    # 处理失败，移动小窗口继续尝试
+                    shift_size = min_process_samples // 4
+                    remaining_samples = self.raw_buffer_index - shift_size
+                    if remaining_samples > 0:
+                        self.raw_sample_buffer = self.raw_sample_buffer[shift_size:self.raw_buffer_index]
+                        self.raw_buffer_index = remaining_samples
+                    else:
+                        self.raw_sample_buffer = np.array([], dtype=np.complex64)
+                        self.raw_buffer_index = 0
+
+                return success
+            else:
+                return False  # 数据不足，等待更多数据
+
+        except Exception as e:
+            print(f"原始样本处理错误: {str(e)}")
+            return False
+
+    def _process_accumulated_samples(self, num_samples):
+        """处理累积的样本数据 - 兼容UDP/硬件模式"""
         try:
             # 获取要处理的数据
-            process_data = self.processing_buffer[:num_samples]
+            process_data = self.raw_sample_buffer[:num_samples]
 
             # 1. 匹配滤波
             filtered = np.convolve(process_data, self.qpsk_system.rrc_filter, mode='valid')
@@ -509,8 +642,17 @@ class ProcessingProgram:
             # 9. 符号到比特转换
             recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
 
-            # 10. 打印前100个解调比特
-            print(f"帧 {self.total_processed_frames + 1} 解调结果: {''.join(map(str, recv_bits[:100].astype(int)))}")
+            # 10. 计算BER（生成期望的发射比特进行比较）
+            expected_bits = self.generate_bits(mode=getattr(self.args, 'bit_generator', 'random'), num_bits=len(recv_bits))
+            if len(expected_bits) == len(recv_bits):
+                errors = np.sum(expected_bits != recv_bits)
+                ber = errors / len(recv_bits)
+                self.ber_history.append(ber)
+                if len(self.ber_history) > 50:
+                    self.ber_history.pop(0)
+                print(f"帧 {self.total_processed_frames + 1} BER: {ber:.2e} (错误: {errors}/{len(recv_bits)})")
+            else:
+                print(f"帧 {self.total_processed_frames + 1} BER计算失败: 比特长度不匹配 ({len(expected_bits)} vs {len(recv_bits)})")
 
             # 11. 更新GUI数据
             gui_data = {
@@ -530,7 +672,141 @@ class ProcessingProgram:
             return True
 
         except Exception as e:
-            print(f"累积数据处理错误: {str(e)}")
+            print(f"累积样本处理错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _process_frame_packet(self, frame_packet):
+        """处理完整的帧数据包 - 利用帧级信息进行精确同步"""
+        try:
+            frame_id = frame_packet.get('frame_id', 'unknown')
+            rx_signal = frame_packet.get('rx_signal')
+            tx_signal = frame_packet.get('tx_signal')
+            tx_bits = frame_packet.get('tx_bits')
+            timestamp = frame_packet.get('timestamp')
+
+            if rx_signal is None or len(rx_signal) == 0:
+                print(f"帧 {frame_id}: 接收信号为空")
+                return False
+
+            # 验证rx_signal是有效的numpy数组
+            if not isinstance(rx_signal, np.ndarray):
+                print(f"帧 {frame_id}: rx_signal不是numpy数组，类型: {type(rx_signal)}")
+                return False
+
+            if rx_signal.dtype not in [np.complex64, np.complex128]:
+                print(f"帧 {frame_id}: rx_signal数据类型不正确: {rx_signal.dtype}")
+                return False
+
+            print(f"处理帧 {frame_id}: {len(rx_signal)} 样本")
+
+            # 1. 匹配滤波
+            filtered = np.convolve(rx_signal, self.qpsk_system.rrc_filter, mode='valid')
+            if len(filtered) < self.qpsk_system.frame_len // 2:  # 确保有足够的数据
+                print(f"帧 {frame_id}: 滤波后数据不足")
+                return False
+
+            # 下采样得到符号
+            rx_symbols = filtered[::self.qpsk_system.sps]
+
+            # 2. PSS同步 - 寻找最佳同步位置
+            timing_offset = self.qpsk_system._enhanced_pss_sync(rx_symbols)
+
+            # 3. 验证同步质量
+            pss_conj = np.conj(self.qpsk_system.pss[::-1])
+            corr = np.correlate(rx_symbols, pss_conj, mode='full')
+            sync_peak = np.max(np.abs(corr))
+            sync_quality = sync_peak / (np.mean(np.abs(corr)) + 1e-12)
+
+            # 更新同步质量历史
+            self.sync_state['sync_quality_history'].append(sync_quality)
+            if len(self.sync_state['sync_quality_history']) > 10:
+                self.sync_state['sync_quality_history'].pop(0)
+
+            # 同步质量阈值判断
+            avg_sync_quality = np.mean(self.sync_state['sync_quality_history'])
+            if avg_sync_quality < 0.2:  # 降低阈值，提高同步成功率
+                print(f"帧 {frame_id}: 同步质量不足: 当前={sync_quality:.2f}, 平均={avg_sync_quality:.2f}")
+                return False
+
+            print(f"帧 {frame_id}: 同步成功: 质量={sync_quality:.2f}, 偏移={timing_offset}")
+
+            # 4. 频率同步
+            coarse_freq = self.qpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
+            fine_freq = self.qpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
+            total_freq = coarse_freq + fine_freq
+
+            # 更新频率偏移状态
+            self.sync_state['freq_offset'] = 0.9 * self.sync_state['freq_offset'] + 0.1 * total_freq
+
+            # 5. 频率校正
+            Ts = 1.0 / self.args.rate
+            n = np.arange(len(rx_symbols))
+            phase_correction = np.exp(-1j * 2 * np.pi * self.sync_state['freq_offset'] * n * Ts)
+            rx_corrected = rx_symbols * phase_correction
+
+            # 6. 提取数据符号
+            data_start = timing_offset + self.qpsk_system.preamble_len
+            data_end = data_start + self.qpsk_system.data_symbols
+
+            if data_start >= len(rx_corrected) or data_end > len(rx_corrected) or data_end - data_start < 100:
+                print(f"帧 {frame_id}: 数据提取范围无效: start={data_start}, end={data_end}, total={len(rx_corrected)}")
+                return False
+
+            data_symbols = rx_corrected[data_start:data_end]
+
+            # 7. Costas环相位同步
+            synchronized_symbols = self.costas_loop.process(data_symbols)
+
+            # 8. 差分解码
+            demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)
+
+            # 9. 符号到比特转换
+            recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
+
+            # 10. 计算BER（如果有发送比特）
+            ber = None
+            if tx_bits is not None and len(tx_bits) == len(recv_bits):
+                errors = np.sum(tx_bits != recv_bits)
+                ber = errors / len(tx_bits)
+                self.ber_history.append(ber)
+                if len(self.ber_history) > 50:
+                    self.ber_history.pop(0)
+                print(f"帧 {frame_id} BER: {ber:.2e} (错误: {errors}/{len(recv_bits)})")
+            else:
+                # 如果没有tx_bits，使用generate_bits生成期望比特进行BER计算
+                expected_bits = self.generate_bits(mode=getattr(self.args, 'bit_generator', 'random'), num_bits=len(recv_bits))
+                if len(expected_bits) == len(recv_bits):
+                    errors = np.sum(expected_bits != recv_bits)
+                    ber = errors / len(recv_bits)
+                    self.ber_history.append(ber)
+                    if len(self.ber_history) > 50:
+                        self.ber_history.pop(0)
+                    print(f"帧 {frame_id} BER: {ber:.2e} (错误: {errors}/{len(recv_bits)}) (使用生成比特)")
+                else:
+                    print(f"帧 {frame_id} BER计算失败: 比特长度不匹配 ({len(expected_bits)} vs {len(recv_bits)})")
+
+            # 11. 更新GUI数据
+            gui_data = {
+                'constellation': synchronized_symbols.copy(),
+                'time_domain': rx_corrected[data_start-100:data_start+500].copy(),
+                'sync_quality': sync_quality,
+                'frame_count': self.total_processed_frames
+            }
+            self._update_gui_data(gui_data)
+
+            self.total_processed_frames += 1
+            self.sync_state['last_valid_sync'] = self.total_processed_frames
+
+            if self.total_processed_frames % 10 == 0:
+                avg_ber = np.mean(self.ber_history) if self.ber_history else 0
+                print(f"已处理帧数: {self.total_processed_frames}, 平均BER: {avg_ber:.2e}, 同步质量: {sync_quality:.2f}")
+
+            return True
+
+        except Exception as e:
+            print(f"帧数据包处理错误: {str(e)}")
             import traceback
             traceback.print_exc()
             return False
@@ -623,34 +899,47 @@ class ProcessingProgram:
 
     def start(self, enable_gui=True):
         """启动处理程序"""
-        print("启动DQPSK处理程序...")
+        print(f"启动DQPSK处理程序 (模式: {self.mode})...")
 
-        # 如果是Queue模式，连接服务器获取队列
-        if self.ipc_mode == "queue":
-            print("连接队列服务器...")
-            try:
-                class QueueManager(BaseManager):
-                    pass
-                QueueManager.register('get_queue')
-
-                self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
-                self.queue_manager.connect()
-                self.ipc_queue = self.queue_manager.get_queue()
-                print("成功连接队列服务器，获取队列对象")
-            except Exception as e:
-                print(f"连接队列服务器失败: {e}")
+        # 根据模式初始化
+        if self.mode == "simulation":
+            # 仿真模式：优先使用sim_rx_queue，如果没有则使用IPC队列
+            if self.sim_rx_queue is None and self.ipc_queue is None:
+                print("仿真模式需要先设置sim_rx_queue或IPC队列")
                 return
+            print("仿真模式: 初始化完成")
+        else:
+            # 硬件模式需要IPC初始化
+            if self.ipc_mode == "queue":
+                print("连接队列服务器...")
+                try:
+                    class QueueManager(BaseManager):
+                        pass
+                    QueueManager.register('get_queue')
+
+                    self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
+                    self.queue_manager.connect()
+                    self.ipc_queue = self.queue_manager.get_queue()
+                    print("成功连接队列服务器，获取队列对象")
+                except Exception as e:
+                    print(f"连接队列服务器失败: {e}")
+                    return
 
         # 设置运行标志
         self.running.set()
 
-        # 根据IPC模式启动相应的接收线程
-        if self.ipc_mode == "udp":
+        # 根据模式和IPC配置启动相应的接收线程
+        if self.mode == "simulation" and self.sim_rx_queue is not None:
+            # 仿真模式使用专用队列
             self.ipc_receive_thread = threading.Thread(target=self.ipc_receive_thread_func)
-        elif self.ipc_mode == "queue":
+        elif self.ipc_mode == "udp":
+            # UDP模式
+            self.ipc_receive_thread = threading.Thread(target=self.ipc_receive_thread_func)
+        elif self.ipc_mode == "queue" or (self.mode == "simulation" and self.ipc_queue is not None):
+            # 队列模式（包括仿真模式使用IPC队列的情况）
             self.ipc_receive_thread = threading.Thread(target=self.queue_receive_thread_func)
         else:
-            raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
+            raise ValueError(f"不支持的配置: mode={self.mode}, ipc_mode={self.ipc_mode}")
 
         self.ipc_receive_thread.daemon = True
         self.ipc_receive_thread.start()
@@ -670,7 +959,7 @@ class ProcessingProgram:
             try:
                 while self.running.is_set():
                     time.sleep(1)
-                    print(f"统计: 已处理帧数 {self.total_processed_frames}, 缓冲区大小 {len(self.processing_buffer)}")
+                    print(f"统计: 已处理帧数 {self.total_processed_frames}")
             except KeyboardInterrupt:
                 print("\n收到停止信号...")
         else:
@@ -679,7 +968,7 @@ class ProcessingProgram:
             try:
                 while self.running.is_set():
                     time.sleep(1)
-                    print(f"统计: 已处理帧数 {self.total_processed_frames}, 缓冲区大小 {len(self.processing_buffer)}")
+                    print(f"统计: 已处理帧数 {self.total_processed_frames}")
             except KeyboardInterrupt:
                 print("\n收到停止信号...")
 
@@ -703,15 +992,44 @@ class ProcessingProgram:
 
 def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK处理程序")
+    parser.add_argument("--mode", type=str, default="hardware", choices=["hardware", "simulation"], help="运行模式")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
     parser.add_argument("--ipc_mode", type=str, default="queue", choices=["udp", "queue"], help="IPC模式：udp 或 queue")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="队列服务器主机地址")
+    parser.add_argument("--port", type=int, default=50000, help="队列服务器端口")
+    parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式（与发射端保持一致）")
 
     args = parser.parse_args()
 
     # 创建处理程序
     processing_program = ProcessingProgram(args)
+
+    # 如果是队列模式，连接到队列服务器
+    if args.ipc_mode == "queue":
+        try:
+            from multiprocessing.managers import BaseManager
+            print(f"连接到队列服务器: {args.host}:{args.port}")
+
+            # 注册队列管理器
+            class QueueManager(BaseManager):
+                pass
+            QueueManager.register('get_queue')
+
+            # 连接到服务器
+            manager = QueueManager(address=(args.host, args.port), authkey=b'queue_key')
+            manager.connect()
+
+            # 获取队列对象
+            ipc_queue = manager.get_queue()
+            processing_program.set_queue(ipc_queue)
+            print("✅ 队列连接成功")
+
+        except Exception as e:
+            print(f"❌ 队列连接失败: {e}")
+            print("请确保队列服务器已启动")
+            return
 
     # 启动
     processing_program.start()

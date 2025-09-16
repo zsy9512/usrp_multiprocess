@@ -395,9 +395,19 @@ class EnhancedCostasLoop:
         return np.array(output)
 
 class USRP_DQPSK_System:
-    def transmit_and_receive(self, snr_db=None, freq_offset=None, phase_offset=None, n_frames=1, usrp_tx=None, usrp_rx=None):
+    def transmit_and_receive(self, snr_db=None, freq_offset=None, phase_offset=None, n_frames=1, 
+                            usrp_tx=None, usrp_rx=None, use_direct_sync=False, ipc_queue=None):
         """
-        统一的收发流程：仿真/硬件共用。仿真时snr_db等参数有效，硬件时usrp_tx/usrp_rx为USRP对象。
+        统一的收发流程：支持仿真/硬件/直接同步/进程间通信模式
+        Args:
+            snr_db: 信噪比(dB)，仿真模式使用
+            freq_offset: 频率偏移(Hz)，仿真模式使用
+            phase_offset: 相位偏移(rad)，仿真模式使用
+            n_frames: 帧数量
+            usrp_tx: USRP发射对象，硬件模式使用
+            usrp_rx: USRP接收对象，硬件模式使用
+            use_direct_sync: 是否使用直接同步（发射数据直接传递给接收端）
+            ipc_queue: 进程间通信队列，仿真IPC模式使用
         返回：ber_list, 可选星座点等
         """
         ber_list = []
@@ -406,9 +416,15 @@ class USRP_DQPSK_System:
             # 1. 生成帧
             frame, tx_bits = self.generate_frame(return_bits=True)
             tx_signal = self.prepare_tx_signal(frame)
-            # 2. 信道
-            if self.mode == "simulation":
-                # 仿真信道
+            # 2. 信道处理
+            if use_direct_sync:
+                # 直接同步模式：发射数据直接传递给接收端
+                rx_signal = self._direct_sync_path(tx_signal, snr_db, freq_offset, phase_offset)
+            elif ipc_queue is not None:
+                # IPC仿真模式：通过队列进行进程间通信
+                rx_signal = self._simulate_channel_with_ipc(tx_signal, snr_db, freq_offset, phase_offset, ipc_queue)
+            elif self.mode == "simulation":
+                # 传统仿真信道
                 snr = snr_db if snr_db is not None else self.sim_params["snr_db"]
                 freq_off = freq_offset if freq_offset is not None else self.sim_params["freq_offset"]
                 phase_off = phase_offset if phase_offset is not None else self.sim_params["phase_offset"]
@@ -886,3 +902,61 @@ class USRP_DQPSK_System:
         #     print(f"FFT-based fine frequency estimation: {residual_freq:.2f} Hz")
 
         return residual_freq
+
+    def _direct_sync_path(self, tx_signal, snr_db, freq_offset, phase_offset):
+        """直接同步路径：发射数据直接传递给接收处理"""
+        # 应用信道效应（与传统仿真相同）
+        snr = snr_db if snr_db is not None else self.sim_params["snr_db"]
+        freq_off = freq_offset if freq_offset is not None else self.sim_params["freq_offset"]
+        phase_off = phase_offset if phase_offset is not None else self.sim_params["phase_offset"]
+
+        n = np.arange(len(tx_signal))
+        # 应用频率偏移
+        tx_signal = tx_signal * np.exp(1j * 2 * np.pi * freq_off * n / self.samp_rate)
+        # 应用相位偏移
+        tx_signal = tx_signal * np.exp(1j * phase_off)
+
+        # 添加AWGN噪声
+        signal_power = np.mean(np.abs(tx_signal)**2)
+        noise_power = signal_power / (10**(snr/10))
+        noise = np.sqrt(noise_power/2) * (np.random.randn(len(tx_signal)) + 1j * np.random.randn(len(tx_signal)))
+
+        return tx_signal + noise
+
+    def _simulate_channel_with_ipc(self, tx_signal, snr_db, freq_offset, phase_offset, ipc_queue):
+        """使用IPC队列的仿真信道"""
+        # 应用信道效应
+        rx_signal = self._direct_sync_path(tx_signal, snr_db, freq_offset, phase_offset)
+
+        # 创建数据包
+        packet = {
+            'frame_id': getattr(self, 'current_frame', 0),
+            'tx_signal': tx_signal.copy(),
+            'rx_signal': rx_signal.copy(),
+            'tx_bits': getattr(self, 'current_tx_bits', None),
+            'timestamp': time.time(),
+            'metadata': {
+                'snr_db': snr_db,
+                'freq_offset': freq_offset,
+                'phase_offset': phase_offset
+            }
+        }
+
+        # 发送到IPC队列
+        try:
+            ipc_queue.put(packet, timeout=1.0)
+            if self.verbose:
+                print(f"IPC仿真: 发送数据包到队列 (大小: {len(rx_signal)})")
+        except Exception as e:
+            print(f"IPC发送错误: {e}")
+            return rx_signal
+
+        # 从队列接收处理后的数据（可选，用于双向通信）
+        try:
+            processed_packet = ipc_queue.get(timeout=0.1)
+            if 'processed_signal' in processed_packet:
+                return processed_packet['processed_signal']
+        except:
+            pass
+
+        return rx_signal

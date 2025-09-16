@@ -12,36 +12,71 @@ import struct
 import multiprocessing
 from multiprocessing.managers import BaseManager
 from dqpsk_system import USRP_DQPSK_System
+from simulation_manager import SimulationManager, SimulationIPC
 
 class RXProgram:
-    """接收程序：高速接收数据，滤除噪声，通过文件IPC发送到处理程序"""
+    """接收程序：高速接收数据，滤除噪声，通过IPC发送到处理程序，支持硬件和仿真模式"""
 
     def __init__(self, args):
         self.args = args
         self.running = threading.Event()
         self.rx_enabled = threading.Event()
 
-        # 初始化DQPSK系统
-        self.qpsk_system = USRP_DQPSK_System(
-            mode="hardware",
-            center_freq=args.rx_freq,
-            samp_rate=args.rate,
-            tx_gain=0,  # 接收程序不需要发射增益
-            rx_gain=args.rx_gain,
-            sps=2,
-            roll_off=0.35,
-            verbose=True
-        )
+        # 检测运行模式
+        self.mode = getattr(args, 'mode', 'hardware')
+
+        # 根据模式初始化系统
+        if self.mode == "simulation":
+            # 仿真模式
+            self.qpsk_system = USRP_DQPSK_System(
+                mode="simulation",
+                center_freq=getattr(args, 'rx_freq', 900e6),
+                samp_rate=getattr(args, 'rate', 1e6),
+                tx_gain=0,
+                rx_gain=getattr(args, 'rx_gain', 50),
+                sps=2,
+                roll_off=0.35,
+                verbose=True
+            )
+
+            # 仿真通信相关
+            self.sim_manager = None
+            self.rx_queue = None
+
+            # USRP相关（仿真模式下为None）
+            self.usrp = None
+            self.rx_streamer = None
+
+        else:
+            # 硬件模式
+            self.qpsk_system = USRP_DQPSK_System(
+                mode="hardware",
+                center_freq=args.rx_freq,
+                samp_rate=args.rate,
+                tx_gain=0,
+                rx_gain=args.rx_gain,
+                sps=2,
+                roll_off=0.35,
+                verbose=True
+            )
+
+            # USRP相关
+            self.usrp = None
+            self.rx_streamer = None
+
+            # 仿真相关（硬件模式下为None）
+            self.sim_manager = None
+            self.rx_queue = None
 
         # 环形缓冲区设计
-        self.buffer_size = args.buffer_size  # 缓冲区大小
+        self.buffer_size = max(args.buffer_size, 20000)  # 确保最小20000样本
         self.rx_buffer = np.zeros(self.buffer_size, dtype=np.complex64)
         self.buffer_head = 0  # 写入指针
         self.buffer_tail = 0  # 读取指针
         self.buffer_lock = threading.Lock()  # 保护环形缓冲区
-        
+
         # 发送块大小（连续读取的长度）
-        self.send_block_size = 1000  # 每次发送1000个复数样本
+        self.send_block_size =2000  # 每次发送3000个复数样本
 
         # IPC相关
         self.ipc_mode = args.ipc_mode
@@ -71,6 +106,15 @@ class RXProgram:
         self.rx_thread = None
         self.ipc_send_thread = None
 
+    def set_simulation_manager(self, sim_manager, rx_queue):
+        """设置仿真管理器（仿真模式使用）"""
+        if self.mode == "simulation":
+            self.sim_manager = sim_manager
+            self.rx_queue = rx_queue
+            print("接收程序: 仿真管理器已设置")
+        else:
+            print("警告: 非仿真模式下设置仿真管理器无效")
+
     def set_queue(self, ipc_queue):
         """设置IPC Queue对象（用于Queue模式）"""
         if self.ipc_mode == "queue":
@@ -98,6 +142,19 @@ class RXProgram:
 
     def _write_to_buffer(self, samples):
         """写入数据到环形缓冲区"""
+        # 验证输入参数
+        if samples is None:
+            print("警告: 尝试写入None数据到缓冲区")
+            return
+
+        if not isinstance(samples, np.ndarray):
+            print(f"错误: samples不是numpy数组，类型: {type(samples)}")
+            return
+
+        if samples.dtype not in [np.complex64, np.complex128]:
+            print(f"错误: samples数据类型不正确: {samples.dtype}")
+            return
+
         num_samps = len(samples)
         with self.buffer_lock:
             available_space = self._get_available_space()
@@ -113,6 +170,7 @@ class RXProgram:
             else:
                 # 缓冲区满，丢弃数据
                 self.overflow_count += 1
+                print(f"缓冲区溢出: 可用空间 {available_space}, 需要 {num_samps}")
 
     def _read_from_buffer(self, num_samples):
         """从环形缓冲区读取固定长度的数据"""
@@ -162,10 +220,100 @@ class RXProgram:
             print(f"USRP初始化失败: {str(e)}")
             raise
 
+    def _apply_simulation_channel(self, tx_signal):
+        """
+        应用仿真信道效应
+        Args:
+            tx_signal: 发送信号 (numpy array)
+        Returns:
+            rx_signal: 接收信号 (numpy array)
+        """
+        # 复制信号
+        rx_signal = tx_signal.copy()
+        
+        # 仿真参数 (可以从args或配置文件读取)
+        snr_db = getattr(self.args, 'snr_db', 15.0)  # 信噪比
+        freq_offset = getattr(self.args, 'freq_offset', 1000.0)  # 频率偏移(Hz)
+        phase_offset = getattr(self.args, 'phase_offset', 0.0)  # 相位偏移(rad)
+        
+        # 1. 添加频率偏移
+        if freq_offset != 0:
+            t = np.arange(len(rx_signal)) / self.qpsk_system.samp_rate
+            freq_shift = np.exp(1j * 2 * np.pi * freq_offset * t)
+            rx_signal = rx_signal * freq_shift
+        
+        # 2. 添加相位偏移
+        if phase_offset != 0:
+            rx_signal = rx_signal * np.exp(1j * phase_offset)
+        
+        # 3. 添加AWGN噪声
+        if snr_db < 100:  # SNR=100表示无噪声
+            signal_power = np.mean(np.abs(rx_signal)**2)
+            noise_power = signal_power / (10**(snr_db/10))
+            noise = np.sqrt(noise_power/2) * (np.random.randn(len(rx_signal)) + 1j*np.random.randn(len(rx_signal)))
+            rx_signal = rx_signal + noise
+        
+        print(f"仿真信道: SNR={snr_db}dB, 频偏={freq_offset}Hz, 相偏={phase_offset:.3f}rad")
+        return rx_signal
+
     def rx_thread_func(self):
         """接收线程：高速接收数据，滤除噪声"""
-        print(f"接收线程启动: 缓冲区大小 {self.args.buffer_size}")
+        print(f"接收线程启动 (模式: {self.mode}): 缓冲区大小 {self.args.buffer_size}")
 
+        if self.mode == "simulation":
+            # 仿真模式接收逻辑
+            self._rx_simulation_thread_func()
+        else:
+            # 硬件模式接收逻辑
+            self._rx_hardware_thread_func()
+
+    def _rx_simulation_thread_func(self):
+        """仿真模式接收线程"""
+        print("仿真接收线程: 生成仿真数据")
+
+        frame_id = 0
+        while self.running.is_set():
+            try:
+                # 生成仿真信号数据
+                # 创建一个简单的QPSK信号作为测试
+                n_samples = 3000  # 匹配send_block_size
+                n_symbols = n_samples // 2  # QPSK每个符号2个采样
+
+                # 生成随机QPSK符号
+                symbols = np.random.choice([1+1j, 1-1j, -1+1j, -1-1j], n_symbols)
+
+                # 脉冲成形（简单的矩形脉冲）
+                tx_signal = np.repeat(symbols, 2)
+
+                # 添加一些噪声作为基础信号
+                noise = 0.1 * (np.random.randn(len(tx_signal)) + 1j * np.random.randn(len(tx_signal)))
+                tx_signal = tx_signal + noise
+
+                print(f"仿真接收: 生成帧 {frame_id}, 大小 {len(tx_signal)}")
+
+                # 应用仿真信道效应
+                rx_signal = self._apply_simulation_channel(tx_signal)
+
+                # 将处理后的信号写入环形缓冲区
+                self._write_to_buffer(rx_signal)
+                print(f"仿真接收: 帧 {frame_id} 已添加信道效应并写入缓冲区")
+
+                frame_id += 1
+
+                # 控制生成速度，避免过快
+                time.sleep(0.1)
+
+            except Exception as e:
+                print(f"仿真接收错误: {str(e)}")
+                print(f"错误类型: {type(e).__name__}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+
+        print("仿真接收线程结束")
+
+    def _rx_hardware_thread_func(self):
+        """硬件模式接收线程"""
         if self.rx_streamer is None:
             print("接收线程: rx_streamer未初始化")
             return
@@ -197,17 +345,11 @@ class RXProgram:
                         signal_power = np.mean(np.abs(samples[::step])**2)
 
                         # 功率阈值判断
-                        if signal_power < 0.2:
+                        if signal_power < 0.05:
                             self.noise_discard_count += 1
                             
                             continue
-
-                        # 有效信号，连续写入环形缓冲区
                         self._write_to_buffer(samples)
-                        
-                        if monitor_count % 50 == 0:  # 从100改为50，更频繁地显示
-                            available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
-                            print(f"接收调试: 信号功率 {signal_power:.6f}, 缓冲区使用率 {available_samples}/{self.buffer_size}")
 
                     # 检查UHD错误
                     if metadata.error_code != 0:
@@ -252,19 +394,13 @@ class RXProgram:
                         # 使用Queue发送
                         try:
                             self.ipc_queue.put(data_block, timeout=1.0)
-                            print(f"Queue发送: 数据块大小 {len(data_block)}")
+                            #print(f"Queue发送: 数据块大小 {len(data_block)}")
                         except queue.Full:
                             print("Queue满，丢弃数据块")
                         except Exception as e:
                             print(f"Queue发送错误: {str(e)}")
                     else:
                         print(f"IPC模式 {self.ipc_mode} 未正确初始化")
-                else:
-                    # 调试信息：显示缓冲区状态
-                    available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
-                    if available_samples > 0:
-                        print(f"发送等待: 缓冲区有 {available_samples} 样本，需 {self.send_block_size} 样本")
-                    # 没有足够的数据，等待下次循环
 
                 time.sleep(0.01)  # 10ms发送间隔
 
@@ -283,30 +419,38 @@ class RXProgram:
 
     def start(self):
         """启动接收程序"""
-        print("启动接收程序...")
+        print(f"启动接收程序 (模式: {self.mode})...")
 
-        # 如果是Queue模式，连接服务器获取队列
-        if self.ipc_mode == "queue":
-            print("连接队列服务器...")
-            try:
-                class QueueManager(BaseManager):
-                    pass
-                QueueManager.register('get_queue')
-
-                self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
-                print("尝试连接到服务器...")
-                self.queue_manager.connect()
-                print("连接成功，获取队列...")
-                self.ipc_queue = self.queue_manager.get_queue()
-                print(f"成功连接队列服务器，获取队列对象: {self.ipc_queue}")
-            except Exception as e:
-                print(f"连接队列服务器失败: {e}")
-                import traceback
-                traceback.print_exc()
+        # 根据模式初始化
+        if self.mode == "simulation":
+            # 仿真模式：优先使用rx_queue，如果没有则可以只使用IPC发送
+            if self.rx_queue is None and self.ipc_queue is None:
+                print("仿真模式需要先设置rx_queue或IPC队列")
                 return
+            print("仿真模式: 初始化完成")
+        else:
+            # 硬件模式需要USRP和IPC初始化
+            if self.ipc_mode == "queue":
+                print("连接队列服务器...")
+                try:
+                    class QueueManager(BaseManager):
+                        pass
+                    QueueManager.register('get_queue')
 
-        # 初始化USRP
-        self._init_usrp()
+                    self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
+                    print("尝试连接到服务器...")
+                    self.queue_manager.connect()
+                    print("连接成功，获取队列...")
+                    self.ipc_queue = self.queue_manager.get_queue()
+                    print(f"成功连接队列服务器，获取队列对象: {self.ipc_queue}")
+                except Exception as e:
+                    print(f"连接队列服务器失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    return
+
+            # 初始化USRP
+            self._init_usrp()
 
         # 设置运行标志
         self.running.set()
@@ -354,6 +498,7 @@ class RXProgram:
 
 def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK接收程序")
+    parser.add_argument("--mode", type=str, default="hardware", choices=["hardware", "simulation"], help="运行模式")
     parser.add_argument("--rx_freq", type=float, default=900e6, help="接收频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--rx_gain", type=float, default=50, help="接收增益 (dB)")
@@ -362,11 +507,41 @@ def main():
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
     parser.add_argument("--ipc_mode", type=str, default="queue", choices=["udp", "queue"], help="IPC模式：udp 或 queue")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="队列服务器主机地址")
+    parser.add_argument("--port", type=int, default=50000, help="队列服务器端口")
+    parser.add_argument("--snr_db", type=float, default=15.0, help="仿真信道信噪比 (dB)")
+    parser.add_argument("--freq_offset", type=float, default=1000.0, help="仿真信道频率偏移 (Hz)")
+    parser.add_argument("--phase_offset", type=float, default=0.0, help="仿真信道相位偏移 (rad)")
 
     args = parser.parse_args()
 
     # 创建接收程序
     rx_program = RXProgram(args)
+
+    # 如果是队列模式，连接到队列服务器
+    if args.ipc_mode == "queue":
+        try:
+            from multiprocessing.managers import BaseManager
+            print(f"连接到队列服务器: {args.host}:{args.port}")
+
+            # 注册队列管理器
+            class QueueManager(BaseManager):
+                pass
+            QueueManager.register('get_queue')
+
+            # 连接到服务器
+            manager = QueueManager(address=(args.host, args.port), authkey=b'queue_key')
+            manager.connect()
+
+            # 获取队列对象
+            ipc_queue = manager.get_queue()
+            rx_program.set_queue(ipc_queue)
+            print("✅ 队列连接成功")
+
+        except Exception as e:
+            print(f"❌ 队列连接失败: {e}")
+            print("请确保队列服务器已启动")
+            return
 
     # 启动
     rx_program.start()
