@@ -395,76 +395,7 @@ class EnhancedCostasLoop:
         return np.array(output)
 
 class USRP_DQPSK_System:
-    def transmit_and_receive(self, snr_db=None, freq_offset=None, phase_offset=None, n_frames=1, 
-                            usrp_tx=None, usrp_rx=None, use_direct_sync=False, ipc_queue=None):
-        """
-        统一的收发流程：支持仿真/硬件/直接同步/进程间通信模式
-        Args:
-            snr_db: 信噪比(dB)，仿真模式使用
-            freq_offset: 频率偏移(Hz)，仿真模式使用
-            phase_offset: 相位偏移(rad)，仿真模式使用
-            n_frames: 帧数量
-            usrp_tx: USRP发射对象，硬件模式使用
-            usrp_rx: USRP接收对象，硬件模式使用
-            use_direct_sync: 是否使用直接同步（发射数据直接传递给接收端）
-            ipc_queue: 进程间通信队列，仿真IPC模式使用
-        返回：ber_list, 可选星座点等
-        """
-        ber_list = []
-        constellation_points = []
-        for frame_idx in range(n_frames):
-            # 1. 生成帧
-            frame, tx_bits = self.generate_frame(return_bits=True)
-            tx_signal = self.prepare_tx_signal(frame)
-            # 2. 信道处理
-            if use_direct_sync:
-                # 直接同步模式：发射数据直接传递给接收端
-                rx_signal = self._direct_sync_path(tx_signal, snr_db, freq_offset, phase_offset)
-            elif ipc_queue is not None:
-                # IPC仿真模式：通过队列进行进程间通信
-                rx_signal = self._simulate_channel_with_ipc(tx_signal, snr_db, freq_offset, phase_offset, ipc_queue)
-            elif self.mode == "simulation":
-                # 传统仿真信道
-                snr = snr_db if snr_db is not None else self.sim_params["snr_db"]
-                freq_off = freq_offset if freq_offset is not None else self.sim_params["freq_offset"]
-                phase_off = phase_offset if phase_offset is not None else self.sim_params["phase_offset"]
-                n = np.arange(len(tx_signal))
-                tx_signal = tx_signal * np.exp(1j * 2 * np.pi * freq_off * n / self.samp_rate)
-                tx_signal = tx_signal * np.exp(1j * phase_off)
-                signal_power = np.mean(np.abs(tx_signal)**2)
-                noise_power = signal_power / (10**(snr/10))
-                noise = np.sqrt(noise_power/2) * (np.random.randn(len(tx_signal)) + 1j * np.random.randn(len(tx_signal)))
-                rx_signal = tx_signal + noise
-            else:
-                # 硬件信道
-                if usrp_tx is None or usrp_rx is None:
-                    raise RuntimeError("硬件模式需提供usrp_tx和usrp_rx对象")
-                usrp_tx.send(tx_signal)
-                rx_signal = usrp_rx.recv(len(tx_signal))
-            # 3. 匹配滤波
-            rx_filtered = np.convolve(rx_signal, self.rrc_filter, mode='same')
-            rx_symbols = rx_filtered[::self.sps]
-            # 4. 同步
-            timing_offset = self._enhanced_pss_sync(rx_symbols)
-            coarse_freq = self._enhanced_sss_sync(rx_symbols, timing_offset)
-            fine_freq = self._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
-            n2 = np.arange(len(rx_symbols))
-            rx_symbols_corr = rx_symbols * np.exp(-1j * 2 * np.pi * (coarse_freq+fine_freq) * n2 * self.Ts)
-            # 5. 数据提取
-            data_start = timing_offset + self.preamble_len
-            data_end = data_start + self.data_symbols
-            data_symbols = rx_symbols_corr[data_start:data_end]
-            # 6. 相位同步
-            costas = self._init_costas_loop(loop_bw=0.002)
-            synced = costas.process(data_symbols)
-            # 7. 差分解码
-            decoded = self.differential_decode(synced)
-            rx_bits = self._symbols_to_bits(decoded)
-            min_len = min(len(tx_bits), len(rx_bits))
-            ber = self._calculate_ber(tx_bits[:min_len], rx_bits[:min_len])
-            ber_list.append(ber)
-            constellation_points.extend(decoded[:min(200, len(decoded))])
-        return ber_list, np.array(constellation_points)
+
     def __init__(self, mode="simulation", center_freq=900e6, samp_rate=1e6, sps=2, roll_off=0.35,
                  tx_gain=40, rx_gain=30, verbose=False):
         """

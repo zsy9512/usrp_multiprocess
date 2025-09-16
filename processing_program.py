@@ -636,6 +636,9 @@ class ProcessingProgram:
             # 7. Costas环相位同步
             synchronized_symbols = self.costas_loop.process(data_symbols)
 
+            # 打印估计的频偏和相偏
+            print(f"估计频偏: {total_freq:.2f} Hz, 相偏: {self.costas_loop.phase:.2f} rad")
+
             # 8. 差分解码
             demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)
 
@@ -758,6 +761,9 @@ class ProcessingProgram:
 
             # 7. Costas环相位同步
             synchronized_symbols = self.costas_loop.process(data_symbols)
+
+            # 打印估计的频偏和相偏
+            print(f"帧 {frame_id} 估计频偏: {total_freq:.2f} Hz, 相偏: {self.costas_loop.phase:.2f} rad")
 
             # 8. 差分解码
             demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)

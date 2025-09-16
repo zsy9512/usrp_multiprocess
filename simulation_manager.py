@@ -28,7 +28,7 @@ class SimulationManager:
         self.channel_params = {
             'snr_db': 15.0,
             'freq_offset': 1000.0,
-            'phase_offset': 0.0,
+            'phase_offset': np.pi/4,
             'delay_samples': 0,
             'multipath_enabled': False,
             'fading_enabled': False
