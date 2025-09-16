@@ -32,15 +32,27 @@
 ## 主要流程示意图
 
 ```mermaid
-flowchart LR
-    TX[发射机\ntx_program.py] -->|射频信号| RX[接收机\nrx_program.py]
-    RX -- 数据块/队列 -->|UDP/Queue| PROC[处理程序\nprocessing_program.py]
-    subgraph 队列模式
-        QSRV[队列服务器\nqueue_server.py]
-        RX -- 共享队列 --> QSRV
-        PROC -- 共享队列 --> QSRV
+flowchart TD
+    A[发射机<br/>tx_program.py] -->|射频信号| B[接收机<br/>rx_program.py]
+    B -->|UDP数据块| C[处理程序<br/>processing_program.py]
+    B -->|队列数据| D[队列服务器<br/>queue_server.py]
+    D -->|共享队列| C
+    E[发射机<br/>tx_program.py] -->|射频信号| F[接收机<br/>rx_program.py]
+    F -->|队列数据| G[队列服务器<br/>queue_server.py]
+    G -->|共享队列| H[处理程序<br/>processing_program.py]
+
+    subgraph "UDP模式"
+        A
+        B
+        C
     end
-    style QSRV fill:#f9f,stroke:#333,stroke-width:2px
+
+    subgraph "队列模式"
+        E
+        F
+        G
+        H
+    end
 ```
 
 > 注：队列模式下，接收机和处理程序通过队列服务器共享同一个数据队列，发射机需提前启动。
