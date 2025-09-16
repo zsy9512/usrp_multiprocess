@@ -11,6 +11,8 @@ import argparse
 import os
 import pickle
 import sys
+import multiprocessing
+from multiprocessing.managers import BaseManager
 from dqpsk_system import USRP_DQPSK_System, EnhancedCostasLoop
 
 # PyQt5 GUI imports
@@ -242,12 +244,57 @@ class ProcessingProgram:
         self.processing_queue = queue.Queue(maxsize=1000)  # 从20增加到1000
 
         # IPC相关
+        self.ipc_mode = args.ipc_mode
+        self.ipc_queue = None  # 用于Queue模式
         self.udp_host = args.udp_host
         self.udp_port = args.udp_port
         self.udp_socket = None
 
-        # 使用UDP模式
-        self._init_udp()
+        # 根据IPC模式初始化
+        if self.ipc_mode == "udp":
+            self._init_udp()
+        elif self.ipc_mode == "queue":
+            print("Queue IPC模式已选择，等待设置Queue对象")
+        else:
+            raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
+
+        # 处理相关 - 添加同步状态保持
+        self.costas_loop = EnhancedCostasLoop(loop_bw=0.005, damping=0.707, detector_type='decision_directed')
+        self.sync_state = {
+            'freq_offset': 0.0,
+            'phase_offset': 0.0,
+            'costas_phase': 0.0,
+            'last_valid_sync': 0,
+            'sync_quality_history': []
+        }
+
+        # 统计信息
+        self.total_processed_frames = 0
+        self.ber_history = []
+
+        # GUI相关
+        self.gui_queue = queue.Queue(maxsize=200)
+        self.gui_app = None
+        self.gui_monitor = None
+        self.gui_manager = None
+
+        # 线程
+        self.ipc_receive_thread = None
+        self.processing_thread = None
+        self.gui_thread = None
+
+    def set_queue(self, ipc_queue):
+        """设置IPC Queue对象（用于Queue模式）"""
+        if self.ipc_mode == "queue":
+            self.ipc_queue = ipc_queue
+            print("IPC Queue对象已设置")
+        else:
+            print("警告: 非Queue模式下设置Queue对象无效")
+
+    def set_gui_queue(self, gui_queue):
+        """设置GUI Queue对象"""
+        self.gui_queue = gui_queue
+        print("GUI Queue对象已设置")
 
     def _init_udp(self):
         """初始化UDP通信"""
@@ -260,22 +307,6 @@ class ProcessingProgram:
         except Exception as e:
             print(f"UDP初始化失败: {e}")
             raise
-
-        # 处理相关 - 添加同步状态保持
-        self.costas_loop = EnhancedCostasLoop(loop_bw=0.005, damping=0.707, detector_type='decision_directed')
-        self.sync_state = {
-            'freq_offset': 0.0,
-            'phase_offset': 0.0,
-            'costas_phase': 0.0,
-            'last_valid_sync': 0,
-            'sync_quality_history': []
-        }
-
-        # GUI相关
-        self.gui_queue = queue.Queue(maxsize=200)
-        self.gui_app = None
-        self.gui_monitor = None
-        self.gui_manager = None
 
         # 统计信息
         self.total_processed_frames = 0
@@ -333,12 +364,37 @@ class ProcessingProgram:
 
         print("IPC接收线程结束")
 
+    def queue_receive_thread_func(self):
+        """Queue接收线程：从共享队列接收数据"""
+        print("Queue IPC接收线程启动")
+
+        while self.running.is_set():
+            try:
+                # 从共享队列获取数据 (reduced timeout for faster polling)
+                samples = self.ipc_queue.get(timeout=0.05)  # Changed from 0.1 to 0.05 for responsiveness
+                print(f"Queue接收成功: 数据块大小 {len(samples)}")
+
+                # 放入处理队列
+                try:
+                    self.processing_queue.put(samples, timeout=1.0)
+                except queue.Full:
+                    print("处理队列已满，丢弃数据块")
+
+            except queue.Empty:
+                # 队列为空，继续等待 (no print to reduce spam)
+                time.sleep(0.01)
+            except Exception as e:
+                print(f"Queue接收错误: {str(e)} - 检查服务器连接")
+                time.sleep(0.1)
+
+        print("Queue接收线程结束")
+
     def processing_thread_func(self):
         """处理线程：累积数据后进行完整同步处理"""
         print(f"处理线程启动: 缓冲区大小 {len(self.processing_buffer)}")
 
-        min_process_samples = 40000  # 最少需要4万样本进行有效同步
-        overlap_samples = 10000  # 重叠样本，避免帧边界问题
+        min_process_samples = 3000  # 最少需要2500样本进行有效同步（略大于一帧1560样本）
+        overlap_samples = 1000  # 重叠样本，避免帧边界问题
 
         while self.running.is_set():
             try:
@@ -534,15 +590,68 @@ class ProcessingProgram:
 
         print("GUI线程结束")
 
-    def start(self):
+    def start_gui(self):
+        """在主线程中启动GUI"""
+        try:
+            # 创建Qt应用
+            self.gui_app = QApplication(sys.argv)
+
+            # 创建GUI监控器
+            self.gui_monitor = DQPSKMonitor()
+            self.gui_monitor.gui_app = self.gui_app
+
+            # 创建GUI管理器
+            self.gui_manager = GUIManager(self.gui_queue)
+            self.gui_manager.set_monitor(self.gui_monitor)
+
+            # 启动队列处理线程
+            gui_process_thread = threading.Thread(target=self.gui_manager.process_queue, daemon=True)
+            gui_process_thread.start()
+
+            # 显示GUI
+            self.gui_monitor.show()
+
+            print("PyQt5 GUI启动成功")
+
+            # 运行Qt事件循环（这会阻塞主线程）
+            self.gui_app.exec_()
+
+        except Exception as e:
+            print(f"GUI初始化失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def start(self, enable_gui=True):
         """启动处理程序"""
-        print("启动处理程序...")
+        print("启动DQPSK处理程序...")
+
+        # 如果是Queue模式，连接服务器获取队列
+        if self.ipc_mode == "queue":
+            print("连接队列服务器...")
+            try:
+                class QueueManager(BaseManager):
+                    pass
+                QueueManager.register('get_queue')
+
+                self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
+                self.queue_manager.connect()
+                self.ipc_queue = self.queue_manager.get_queue()
+                print("成功连接队列服务器，获取队列对象")
+            except Exception as e:
+                print(f"连接队列服务器失败: {e}")
+                return
 
         # 设置运行标志
         self.running.set()
 
-        # 启动IPC接收线程
-        self.ipc_receive_thread = threading.Thread(target=self.ipc_receive_thread_func)
+        # 根据IPC模式启动相应的接收线程
+        if self.ipc_mode == "udp":
+            self.ipc_receive_thread = threading.Thread(target=self.ipc_receive_thread_func)
+        elif self.ipc_mode == "queue":
+            self.ipc_receive_thread = threading.Thread(target=self.queue_receive_thread_func)
+        else:
+            raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
+
         self.ipc_receive_thread.daemon = True
         self.ipc_receive_thread.start()
 
@@ -551,19 +660,28 @@ class ProcessingProgram:
         self.processing_thread.daemon = True
         self.processing_thread.start()
 
-        # 启动GUI线程
-        self.gui_thread = threading.Thread(target=self.gui_thread_func)
-        self.gui_thread.daemon = True
-        self.gui_thread.start()
-
-        print("处理程序已启动，按Ctrl+C停止...")
-
-        try:
-            while self.running.is_set():
-                time.sleep(1)
-                print(f"统计: 已处理帧数 {self.total_processed_frames}, 缓冲区大小 {len(self.processing_buffer)}")
-        except KeyboardInterrupt:
-            print("\n收到停止信号...")
+        # 如果启用GUI，启动GUI（这会阻塞主线程）
+        if enable_gui and PYQT_AVAILABLE:
+            print("启动GUI...")
+            self.start_gui()
+        elif enable_gui and not PYQT_AVAILABLE:
+            print("GUI不可用，使用无GUI模式")
+            # 运行主循环
+            try:
+                while self.running.is_set():
+                    time.sleep(1)
+                    print(f"统计: 已处理帧数 {self.total_processed_frames}, 缓冲区大小 {len(self.processing_buffer)}")
+            except KeyboardInterrupt:
+                print("\n收到停止信号...")
+        else:
+            print("处理程序已启动（无GUI模式），按Ctrl+C停止...")
+            # 运行主循环
+            try:
+                while self.running.is_set():
+                    time.sleep(1)
+                    print(f"统计: 已处理帧数 {self.total_processed_frames}, 缓冲区大小 {len(self.processing_buffer)}")
+            except KeyboardInterrupt:
+                print("\n收到停止信号...")
 
         self.stop()
 
@@ -573,21 +691,13 @@ class ProcessingProgram:
 
         self.running.clear()
 
-        # 停止GUI管理器
-        if self.gui_manager:
-            self.gui_manager.stop()
-
-        # 关闭Qt应用
-        if self.gui_app:
-            self.gui_app.quit()
+        # 注意：GUI相关代码已移除
 
         # 等待线程结束
         if self.ipc_receive_thread:
             self.ipc_receive_thread.join(timeout=2)
         if self.processing_thread:
             self.processing_thread.join(timeout=2)
-        if self.gui_thread:
-            self.gui_thread.join(timeout=2)
 
         print("处理程序已停止")
 
@@ -596,6 +706,7 @@ def main():
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
+    parser.add_argument("--ipc_mode", type=str, default="queue", choices=["udp", "queue"], help="IPC模式：udp 或 queue")
 
     args = parser.parse_args()
 

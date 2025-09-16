@@ -9,6 +9,8 @@ import os
 import pickle
 import socket
 import struct
+import multiprocessing
+from multiprocessing.managers import BaseManager
 from dqpsk_system import USRP_DQPSK_System
 
 class RXProgram:
@@ -31,26 +33,30 @@ class RXProgram:
             verbose=True
         )
 
-        # 缓冲区设计
-        self.large_pool_queue = collections.deque(maxlen=args.buffer_size)
+        # 环形缓冲区设计
+        self.buffer_size = args.buffer_size  # 缓冲区大小
+        self.rx_buffer = np.zeros(self.buffer_size, dtype=np.complex64)
+        self.buffer_head = 0  # 写入指针
+        self.buffer_tail = 0  # 读取指针
+        self.buffer_lock = threading.Lock()  # 保护环形缓冲区
+        
+        # 发送块大小（连续读取的长度）
+        self.send_block_size = 1000  # 每次发送1000个复数样本
 
         # IPC相关
+        self.ipc_mode = args.ipc_mode
+        self.ipc_queue = None  # 用于Queue模式
         self.udp_host = args.udp_host
         self.udp_port = args.udp_port
         self.udp_socket = None
 
-        # 使用UDP模式
-        self._init_udp()
-
-    def _init_udp(self):
-        """初始化UDP通信"""
-        try:
-            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            print(f"UDP通信已初始化: {self.udp_host}:{self.udp_port}")
-        except Exception as e:
-            print(f"UDP初始化失败: {e}")
-            raise
+        # 根据IPC模式初始化
+        if self.ipc_mode == "udp":
+            self._init_udp()
+        elif self.ipc_mode == "queue":
+            print("Queue IPC模式已选择，等待设置Queue对象")
+        else:
+            raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
 
         # USRP相关
         self.usrp = None
@@ -64,6 +70,68 @@ class RXProgram:
         # 线程
         self.rx_thread = None
         self.ipc_send_thread = None
+
+    def set_queue(self, ipc_queue):
+        """设置IPC Queue对象（用于Queue模式）"""
+        if self.ipc_mode == "queue":
+            self.ipc_queue = ipc_queue
+            print("Queue对象已设置")
+        else:
+            print("警告: 非Queue模式下设置Queue对象无效")
+
+    def _init_udp(self):
+        """初始化UDP通信"""
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            print(f"UDP通信已初始化: {self.udp_host}:{self.udp_port}")
+        except Exception as e:
+            print(f"UDP初始化失败: {e}")
+            raise
+
+    def _get_available_space(self):
+        """计算环形缓冲区的可用空间"""
+        if self.buffer_head >= self.buffer_tail:
+            return self.buffer_size - self.buffer_head + self.buffer_tail - 1
+        else:
+            return self.buffer_tail - self.buffer_head - 1
+
+    def _write_to_buffer(self, samples):
+        """写入数据到环形缓冲区"""
+        num_samps = len(samples)
+        with self.buffer_lock:
+            available_space = self._get_available_space()
+            if available_space >= num_samps:
+                end_pos = (self.buffer_head + num_samps) % self.buffer_size
+                if end_pos > self.buffer_head:
+                    self.rx_buffer[self.buffer_head:end_pos] = samples
+                else:
+                    mid = self.buffer_size - self.buffer_head
+                    self.rx_buffer[self.buffer_head:] = samples[:mid]
+                    self.rx_buffer[:end_pos] = samples[mid:]
+                self.buffer_head = end_pos
+            else:
+                # 缓冲区满，丢弃数据
+                self.overflow_count += 1
+
+    def _read_from_buffer(self, num_samples):
+        """从环形缓冲区读取固定长度的数据"""
+        with self.buffer_lock:
+            available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
+            if available_samples >= num_samples:
+                end_pos = (self.buffer_tail + num_samples) % self.buffer_size
+                if end_pos > self.buffer_tail:
+                    data_block = self.rx_buffer[self.buffer_tail:end_pos].copy()
+                else:
+                    first_part = self.buffer_size - self.buffer_tail
+                    data_block = np.concatenate([
+                        self.rx_buffer[self.buffer_tail:],
+                        self.rx_buffer[:end_pos]
+                    ])
+                self.buffer_tail = end_pos
+                return data_block
+            else:
+                return None  # 数据不足
 
     def _init_usrp(self):
         """初始化USRP设备"""
@@ -134,19 +202,12 @@ class RXProgram:
                             
                             continue
 
-                        # 有效信号，放入缓冲区
-                        try:
-                            self.large_pool_queue.append(samples)
-                            if len(self.large_pool_queue) >= self.args.buffer_size:
-                                # 缓冲区满时，移除最旧的数据
-                                self.large_pool_queue.popleft()
-                            #monitor_count += 1
-                            #print(f"接收调试: 收到数据{monitor_count:d}, 数据块大小 {len(samples)}, 信号功率 {signal_power:.6f}, 队列大小 {len(self.large_pool_queue)}")
-
-                        except Exception as e:
-                            self.overflow_count += 1
-                            if monitor_count % 1000 == 0:
-                                print(f"缓冲区操作错误: {str(e)}")
+                        # 有效信号，连续写入环形缓冲区
+                        self._write_to_buffer(samples)
+                        
+                        if monitor_count % 50 == 0:  # 从100改为50，更频繁地显示
+                            available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
+                            print(f"接收调试: 信号功率 {signal_power:.6f}, 缓冲区使用率 {available_samples}/{self.buffer_size}")
 
                     # 检查UHD错误
                     if metadata.error_code != 0:
@@ -165,30 +226,45 @@ class RXProgram:
         print("接收线程结束")
 
     def ipc_send_thread_func(self):
-        """IPC发送线程：异步从缓冲区取数据，通过UDP发送"""
-        print("UDP IPC发送线程启动")
+        """IPC发送线程：从环形缓冲区连续读取固定长度数据，通过UDP或Queue发送"""
+        print(f"{self.ipc_mode.upper()} IPC发送线程启动")
 
         while self.running.is_set():
             try:
-                if len(self.large_pool_queue) > 0:
-                    # 从缓冲区取数据
-                    samples = self.large_pool_queue.popleft()
-
-                    if self.udp_socket:
+                # 从环形缓冲区读取固定长度的数据块
+                data_block = self._read_from_buffer(self.send_block_size)
+                if data_block is not None:
+                    if self.ipc_mode == "udp" and self.udp_socket:
                         # 使用UDP发送
                         try:
                             # 将numpy数组序列化为bytes
-                            data_bytes = pickle.dumps(samples)
+                            data_bytes = pickle.dumps(data_block)
                             # 添加数据长度前缀
                             length_prefix = struct.pack('!I', len(data_bytes))
                             message = length_prefix + data_bytes
 
                             self.udp_socket.sendto(message, (self.udp_host, self.udp_port))
-                            print(f"UDP发送: 数据块大小 {len(samples)}, 消息大小 {len(message)} bytes")
+                            print(f"UDP发送: 数据块大小 {len(data_block)}, 消息大小 {len(message)} bytes")
                         except Exception as e:
                             print(f"UDP发送错误: {str(e)}")
-                            # 重新放回缓冲区
-                            self.large_pool_queue.appendleft(samples)
+                            # 如果发送失败，可以选择重新写入缓冲区（可选）
+                    elif self.ipc_mode == "queue" and self.ipc_queue:
+                        # 使用Queue发送
+                        try:
+                            self.ipc_queue.put(data_block, timeout=1.0)
+                            print(f"Queue发送: 数据块大小 {len(data_block)}")
+                        except queue.Full:
+                            print("Queue满，丢弃数据块")
+                        except Exception as e:
+                            print(f"Queue发送错误: {str(e)}")
+                    else:
+                        print(f"IPC模式 {self.ipc_mode} 未正确初始化")
+                else:
+                    # 调试信息：显示缓冲区状态
+                    available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
+                    if available_samples > 0:
+                        print(f"发送等待: 缓冲区有 {available_samples} 样本，需 {self.send_block_size} 样本")
+                    # 没有足够的数据，等待下次循环
 
                 time.sleep(0.01)  # 10ms发送间隔
 
@@ -208,6 +284,26 @@ class RXProgram:
     def start(self):
         """启动接收程序"""
         print("启动接收程序...")
+
+        # 如果是Queue模式，连接服务器获取队列
+        if self.ipc_mode == "queue":
+            print("连接队列服务器...")
+            try:
+                class QueueManager(BaseManager):
+                    pass
+                QueueManager.register('get_queue')
+
+                self.queue_manager = QueueManager(address=(self.udp_host, 50000), authkey=b'queue_key')
+                print("尝试连接到服务器...")
+                self.queue_manager.connect()
+                print("连接成功，获取队列...")
+                self.ipc_queue = self.queue_manager.get_queue()
+                print(f"成功连接队列服务器，获取队列对象: {self.ipc_queue}")
+            except Exception as e:
+                print(f"连接队列服务器失败: {e}")
+                import traceback
+                traceback.print_exc()
+                return
 
         # 初始化USRP
         self._init_usrp()
@@ -232,9 +328,10 @@ class RXProgram:
 
         try:
             while self.running.is_set():
-                time.sleep(0.001)
+                time.sleep(1)
                 # 打印统计信息
-                #print(f"统计: 接收样本 {self.rx_samples_received}, 噪声丢弃 {self.noise_discard_count}, 队列大小 {len(self.large_pool_queue)}")
+                #available_samples = (self.buffer_head - self.buffer_tail) % self.buffer_size
+                #print(f"统计: 接收样本 {self.rx_samples_received}, 噪声丢弃 {self.noise_discard_count}, 缓冲区使用 {available_samples}/{self.buffer_size}")
         except KeyboardInterrupt:
             print("\n收到停止信号...")
 
@@ -261,9 +358,10 @@ def main():
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--rx_gain", type=float, default=50, help="接收增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210_01", help="USRP设备参数")
-    parser.add_argument("--buffer_size", type=int, default=1000, help="接收缓冲区大小")
+    parser.add_argument("--buffer_size", type=int, default=10000, help="接收缓冲区大小")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
+    parser.add_argument("--ipc_mode", type=str, default="queue", choices=["udp", "queue"], help="IPC模式：udp 或 queue")
 
     args = parser.parse_args()
 

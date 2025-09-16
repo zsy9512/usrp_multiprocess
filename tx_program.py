@@ -102,7 +102,7 @@ class TXProgram:
                 # 放入队列
                 self.tx_buffer_queue.put(tx_signal, timeout=0.1)
                 # 生产间隔
-                time.sleep(0.2)  # 100ms间隔
+                time.sleep(0.6)  # 100ms间隔
 
             except queue.Full:
                 print("发射缓冲区已满，等待消费...")
