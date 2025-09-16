@@ -37,22 +37,12 @@ flowchart TD
     B -->|UDP数据块| C[处理程序<br/>processing_program.py]
     B -->|队列数据| D[队列服务器<br/>queue_server.py]
     D -->|共享队列| C
-    E[发射机<br/>tx_program.py] -->|射频信号| F[接收机<br/>rx_program.py]
-    F -->|队列数据| G[队列服务器<br/>queue_server.py]
-    G -->|共享队列| H[处理程序<br/>processing_program.py]
-
-    subgraph "UDP模式"
+    subgraph "通信模式"
         A
         B
         C
     end
 
-    subgraph "队列模式"
-        E
-        F
-        G
-        H
-    end
 ```
 
 > 注：队列模式下，接收机和处理程序通过队列服务器共享同一个数据队列，发射机需提前启动。
