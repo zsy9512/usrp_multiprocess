@@ -67,7 +67,7 @@ class RXProgram:
         self.buffer_lock = threading.Lock()  # 保护环形缓冲区
 
         # 发送块大小（连续读取的长度）
-        self.send_block_size =3000  # 每次发送3000个复数样本
+        self.send_block_size =2500  # 每次发送3000个复数样本
 
         # IPC相关
         self.ipc_mode = args.ipc_mode
@@ -479,9 +479,9 @@ class RXProgram:
 def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK接收程序")
     parser.add_argument("--mode", type=str, default="hardware", choices=["hardware", "simulation"], help="运行模式")
-    parser.add_argument("--rx_freq", type=float, default=900e6, help="接收频率 (Hz)")
+    parser.add_argument("--rx_freq", type=float, default=915e6, help="接收频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--rx_gain", type=float, default=50, help="接收增益 (dB)")
+    parser.add_argument("--rx_gain", type=float, default=40, help="接收增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210_01", help="USRP设备参数")
     parser.add_argument("--buffer_size", type=int, default=10000, help="接收缓冲区大小")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
@@ -491,7 +491,7 @@ def main():
     parser.add_argument("--port", type=int, default=50000, help="队列服务器端口")
     parser.add_argument("--snr_db", type=float, default=15.0, help="仿真信道信噪比 (dB)")
     parser.add_argument("--freq_offset", type=float, default=1000.0, help="仿真信道频率偏移 (Hz)")
-    parser.add_argument("--phase_offset", type=float, default=0.0, help="仿真信道相位偏移 (rad)")
+    parser.add_argument("--phase_offset", type=float, default=np.pi/3, help="仿真信道相位偏移 (rad)")
 
     args = parser.parse_args()
 

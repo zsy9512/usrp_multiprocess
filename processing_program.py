@@ -49,7 +49,7 @@ class DQPSKMonitor(QMainWindow):
         left_layout = QVBoxLayout(left_panel)
 
         # 星座图标题
-        constellation_title = QLabel('DQPSK Constellation (Synchronized)')
+        constellation_title = QLabel('DQPSK Constellation (Differential)')
         constellation_title.setStyleSheet("font-size: 14px; font-weight: bold; margin: 5px;")
         left_layout.addWidget(constellation_title)
 
@@ -134,14 +134,36 @@ class DQPSKMonitor(QMainWindow):
             )
 
     def update_time_domain(self, samples):
-        """更新时域波形"""
+        """更新时域波形 - 实现流动显示"""
         if len(samples) > 0:
-            # 显示前1000个样本
-            display_samples = samples[:min(1000, len(samples))]
-            x_data = np.arange(len(display_samples))
-            y_data = np.real(display_samples)
+            # 初始化滑动窗口缓冲区（如果还没有）
+            if not hasattr(self, 'time_buffer'):
+                self.time_buffer = np.zeros(2500, dtype=np.float32)
+                self.buffer_index = 0
 
-            self.time_curve.setData(x_data, y_data)
+            # 获取实部数据
+            new_samples = np.real(samples)
+
+            # 将新数据添加到缓冲区
+            available_space = len(self.time_buffer) - self.buffer_index
+            if len(new_samples) <= available_space:
+                # 新数据可以完全放入剩余空间
+                self.time_buffer[self.buffer_index:self.buffer_index + len(new_samples)] = new_samples
+                self.buffer_index += len(new_samples)
+            else:
+                # 需要覆盖旧数据
+                # 先填满剩余空间
+                self.time_buffer[self.buffer_index:] = new_samples[:available_space]
+                # 剩余数据覆盖开头
+                remaining = len(new_samples) - available_space
+                self.time_buffer[:remaining] = new_samples[available_space:]
+                self.buffer_index = remaining
+
+            # 创建横坐标（0到2499）
+            x_data = np.arange(2500)
+
+            # 显示缓冲区数据
+            self.time_curve.setData(x_data, self.time_buffer)
 
     def update_sync_quality(self, quality):
         """更新同步质量显示"""
@@ -261,13 +283,14 @@ class ProcessingProgram:
             raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
 
         # 处理相关 - 添加同步状态保持
-        self.costas_loop =self.qpsk_system._init_costas_loop(loop_bw=0.001)
+        self.costas_loop =self.qpsk_system._init_costas_loop(loop_bw=0.01)
         self.sync_state = {
             'freq_offset': 0.0,
             'phase_offset': 0.0,
             'costas_phase': 0.0,
             'last_valid_sync': 0,
-            'sync_quality_history': []
+            'sync_quality_history': [],
+            'global_phase_offset': 0.0  # 添加全局相位追踪
         }
 
         # 统计信息
@@ -322,16 +345,6 @@ class ProcessingProgram:
         else:
             # 默认随机
             return np.random.randint(0, 2, num_bits)
-
-        # 统计信息
-        self.total_processed_frames = 0
-        self.ber_history = []
-
-        # 线程
-        self.ipc_receive_thread = None
-        self.processing_thread = None
-        self.gui_thread = None
-
     def _udp_receive_thread_func(self):
         """UDP接收线程（原有的硬件模式逻辑）"""
         print("UDP IPC接收线程启动")
@@ -447,7 +460,7 @@ class ProcessingProgram:
             self.raw_sample_buffer = np.append(self.raw_sample_buffer, samples)
             self.raw_buffer_index += len(samples)
 
-            min_process_samples = 3000  # 最少需要3000样本进行有效同步
+            min_process_samples = 2500  # 最少需要2500样本进行有效同步
             overlap_samples = 1000  # 重叠样本，避免帧边界问题
 
             # 当有足够数据时进行处理
@@ -544,8 +557,6 @@ class ProcessingProgram:
 
             # 7. Costas环相位同步
             synchronized_symbols = self.costas_loop.process(data_symbols)
-
-            # 打印估计的频偏和相偏
             print(f"估计频偏: {total_freq:.2f} Hz, 相偏: {self.costas_loop.phase:.2f} rad")
 
             # 8. 差分解码
@@ -566,9 +577,27 @@ class ProcessingProgram:
             else:
                 print(f"帧 {self.total_processed_frames + 1} BER计算失败: 比特长度不匹配 ({len(expected_bits)} vs {len(recv_bits)})")
 
-            # 11. 更新GUI数据
+            # 11. 计算差分符号用于固定星座图显示
+            # DQPSK的星座图应显示差分符号（相位差），以避免绝对相位旋转导致的星座图旋转
+            diff_symbols = synchronized_symbols[1:] * np.conj(synchronized_symbols[:-1])
+            
+            # 全局相位追踪：基于差分符号的平均相位更新全局偏移
+            if len(diff_symbols) > 10:
+                avg_phase = np.mean(np.angle(diff_symbols))
+                # 平滑更新全局相位偏移（类似频率偏移的更新）
+                self.sync_state['global_phase_offset'] = 0.9 * self.sync_state['global_phase_offset'] + 0.1 * avg_phase
+                print(f"全局相位偏移更新: {self.sync_state['global_phase_offset']:.4f}")
+            
+            # 应用全局相位校正到差分符号
+            phase_correction = np.exp(-1j * self.sync_state['global_phase_offset'])
+            diff_symbols *= phase_correction
+            
+            # 获取最后500个差分符号用于显示
+            display_constellation = diff_symbols[-500:] if len(diff_symbols) >= 500 else diff_symbols
+
+            # 12. 更新GUI数据
             gui_data = {
-                'constellation': synchronized_symbols.copy(),
+                'constellation': display_constellation.copy(),
                 'time_domain': rx_corrected[data_start-100:data_start+500].copy(),
                 'sync_quality': sync_quality,
                 'frame_count': self.total_processed_frames

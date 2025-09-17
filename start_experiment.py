@@ -2,6 +2,12 @@
 """
 DQPSK连续传输实验快速启动脚本
 一键启动完整的多进程通信实验
+
+支持模式：
+- simulation: 仿真模式，用于测试算法
+- hardware: 硬件USRP模式，用于实际信号收发
+
+更新日期: 2025-09-17
 """
 
 import subprocess
@@ -17,6 +23,13 @@ class DQPSKExperiment:
     """DQPSK实验管理器"""
 
     def __init__(self, mode="simulation", host="127.0.0.1", port=50000):
+        # 参数验证
+        if mode not in ["simulation", "hardware"]:
+            raise ValueError(f"无效的模式: {mode}，必须是 'simulation' 或 'hardware'")
+        
+        if not isinstance(port, int) or port <= 0 or port > 65535:
+            raise ValueError(f"无效的端口号: {port}，必须是 1-65535 之间的整数")
+        
         self.mode = mode
         self.host = host
         self.port = port
