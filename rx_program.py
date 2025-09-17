@@ -12,7 +12,6 @@ import struct
 import multiprocessing
 from multiprocessing.managers import BaseManager
 from dqpsk_system import USRP_DQPSK_System
-from simulation_manager import SimulationManager, SimulationIPC
 
 class RXProgram:
     """接收程序：高速接收数据，滤除噪声，通过IPC发送到处理程序，支持硬件和仿真模式"""
@@ -39,10 +38,6 @@ class RXProgram:
                 verbose=True
             )
 
-            # 仿真通信相关
-            self.sim_manager = None
-            self.rx_queue = None
-
             # USRP相关（仿真模式下为None）
             self.usrp = None
             self.rx_streamer = None
@@ -63,10 +58,6 @@ class RXProgram:
             # USRP相关
             self.usrp = None
             self.rx_streamer = None
-
-            # 仿真相关（硬件模式下为None）
-            self.sim_manager = None
-            self.rx_queue = None
 
         # 环形缓冲区设计
         self.buffer_size = max(args.buffer_size, 20000)  # 确保最小20000样本
@@ -105,15 +96,6 @@ class RXProgram:
         # 线程
         self.rx_thread = None
         self.ipc_send_thread = None
-
-    def set_simulation_manager(self, sim_manager, rx_queue):
-        """设置仿真管理器（仿真模式使用）"""
-        if self.mode == "simulation":
-            self.sim_manager = sim_manager
-            self.rx_queue = rx_queue
-            print("接收程序: 仿真管理器已设置")
-        else:
-            print("警告: 非仿真模式下设置仿真管理器无效")
 
     def set_queue(self, ipc_queue):
         """设置IPC Queue对象（用于Queue模式）"""
@@ -421,9 +403,9 @@ class RXProgram:
 
         # 根据模式初始化
         if self.mode == "simulation":
-            # 仿真模式：优先使用rx_queue，如果没有则可以只使用IPC发送
-            if self.rx_queue is None and self.ipc_queue is None:
-                print("仿真模式需要先设置rx_queue或IPC队列")
+            # 仿真模式：只需要IPC队列
+            if self.ipc_queue is None:
+                print("仿真模式需要先设置IPC队列")
                 return
             print("仿真模式: 初始化完成")
         else:
