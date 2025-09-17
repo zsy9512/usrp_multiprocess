@@ -76,7 +76,7 @@ class RXProgram:
         self.buffer_lock = threading.Lock()  # 保护环形缓冲区
 
         # 发送块大小（连续读取的长度）
-        self.send_block_size =2000  # 每次发送3000个复数样本
+        self.send_block_size =3000  # 每次发送3000个复数样本
 
         # IPC相关
         self.ipc_mode = args.ipc_mode
@@ -252,8 +252,6 @@ class RXProgram:
             noise_power = signal_power / (10**(snr_db/10))
             noise = np.sqrt(noise_power/2) * (np.random.randn(len(rx_signal)) + 1j*np.random.randn(len(rx_signal)))
             rx_signal = rx_signal + noise
-        
-        print(f"仿真信道: SNR={snr_db}dB, 频偏={freq_offset}Hz, 相偏={phase_offset:.3f}rad")
         return rx_signal
 
     def rx_thread_func(self):
@@ -269,35 +267,35 @@ class RXProgram:
 
     def _rx_simulation_thread_func(self):
         """仿真模式接收线程"""
-        print("仿真接收线程: 生成仿真数据")
 
         frame_id = 0
         while self.running.is_set():
             try:
                 # 生成仿真信号数据
                 # 创建一个简单的QPSK信号作为测试
-                n_samples = 3000  # 匹配send_block_size
-                n_symbols = n_samples // 2  # QPSK每个符号2个采样
+                frame, tx_bits = self.qpsk_system .generate_frame(return_bits=True)
+                tx_signal = self.qpsk_system .prepare_tx_signal(frame)
 
-                # 生成随机QPSK符号
-                symbols = np.random.choice([1+1j, 1-1j, -1+1j, -1-1j], n_symbols)
-
-                # 脉冲成形（简单的矩形脉冲）
-                tx_signal = np.repeat(symbols, 2)
-
-                # 添加一些噪声作为基础信号
-                noise = 0.1 * (np.random.randn(len(tx_signal)) + 1j * np.random.randn(len(tx_signal)))
-                tx_signal = tx_signal + noise
-
-                print(f"仿真接收: 生成帧 {frame_id}, 大小 {len(tx_signal)}")
 
                 # 应用仿真信道效应
                 rx_signal = self._apply_simulation_channel(tx_signal)
+                snr_db = getattr(self.args, 'snr_db', 15.0)  # 信噪比
+                # 生成随机QPSK符号
+                total_len = 2040
+                frame_len = len(rx_signal)
+                pad_len = total_len - frame_len
+                if pad_len > 0:
+                    pre_len = np.random.randint(0, pad_len)
+                    post_len = pad_len - pre_len
+                    signal_power = np.mean(np.abs(rx_signal)**2)
+                    noise_power = signal_power / (10**(snr_db/10))
+                    pre_noise = np.sqrt(noise_power/2) * (np.random.randn(pre_len) + 1j * np.random.randn(pre_len))
+                    post_noise = np.sqrt(noise_power/2) * (np.random.randn(post_len) + 1j * np.random.randn(post_len))
+                    rx_signal = np.concatenate([pre_noise, rx_signal, post_noise])
 
                 # 将处理后的信号写入环形缓冲区
                 self._write_to_buffer(rx_signal)
                 print(f"仿真接收: 帧 {frame_id} 已添加信道效应并写入缓冲区")
-
                 frame_id += 1
 
                 # 控制生成速度，避免过快
@@ -319,7 +317,7 @@ class RXProgram:
             return
 
         # 快速接收缓冲区
-        fast_recv_buffer_size = 2048
+        fast_recv_buffer_size = 2040
         recv_buffer = np.zeros((1, fast_recv_buffer_size), dtype=np.complex64)
         metadata = uhd.types.RXMetadata()
 
@@ -394,7 +392,7 @@ class RXProgram:
                         # 使用Queue发送
                         try:
                             self.ipc_queue.put(data_block, timeout=1.0)
-                            #print(f"Queue发送: 数据块大小 {len(data_block)}")
+                            print(f"Queue发送: 数据块大小 {len(data_block)}")
                         except queue.Full:
                             print("Queue满，丢弃数据块")
                         except Exception as e:

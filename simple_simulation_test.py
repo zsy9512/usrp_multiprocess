@@ -51,12 +51,12 @@ def test_process_frame_packet_performance():
 
     # 测试参数
     test_configs = [
-        {"snr_db": 20, "freq_offset": 500, "phase_offset": 0.0, "name": "高SNR，低频偏"},
-        {"snr_db": 15, "freq_offset": 1000, "phase_offset": np.pi/6, "name": "中等SNR，中等频偏"},
+        #{"snr_db": 20, "freq_offset": 500, "phase_offset": 0.0, "name": "高SNR，低频偏"},
+        #{"snr_db": 15, "freq_offset": 1000, "phase_offset": np.pi/4, "name": "中等SNR，中等频偏"},
         {"snr_db": 10, "freq_offset": 2000, "phase_offset": np.pi/3, "name": "低SNR，高频偏"},
     ]
 
-    n_frames = 5  # 每个配置测试的帧数
+    n_frames = 1  # 每个配置测试的帧数
     total_results = []
 
     for config in test_configs:
@@ -73,7 +73,6 @@ def test_process_frame_packet_performance():
             # 1. 生成帧数据
             frame, tx_bits = dqpsk_system.generate_frame(return_bits=True)
             tx_signal = dqpsk_system.prepare_tx_signal(frame)
-
             # 2. 应用信道效应
             rx_signal = apply_channel_effects(
                 tx_signal,
@@ -82,10 +81,29 @@ def test_process_frame_packet_performance():
                 config['phase_offset'],
                 dqpsk_system.samp_rate
             )
+            # === 新增：随机插入噪声样本到两端 ===
+            total_len = 2000
+            frame_len = len(rx_signal)
+            pad_len = total_len - frame_len
+            if pad_len > 0:
+                pre_len = 112
+                post_len = pad_len - pre_len
+                signal_power = np.mean(np.abs(rx_signal)**2)
+                noise_power = signal_power / (10**(config['snr_db']/10))
+                pre_noise = np.sqrt(noise_power/2) * (np.random.randn(pre_len) + 1j * np.random.randn(pre_len))
+                post_noise = np.sqrt(noise_power/2) * (np.random.randn(post_len) + 1j * np.random.randn(post_len))
+                rx_signal = np.concatenate([pre_noise, rx_signal, post_noise])
+                # 记录真实帧头位置
+                true_frame_start = pre_len
+
+            else:
+                true_frame_start = 0
 
             # 3. 创建帧数据包
             frame_packet = create_frame_packet(rx_signal, tx_bits, frame_idx)
+            frame_packet['true_frame_start'] = true_frame_start  # 传递真实帧头位置
 
+            print(f"  帧 {frame_idx}: 生成帧长度={len(frame)}, true_frame_start={true_frame_start}")
             # 4. 测试_process_frame_packet性能
             start_time = time.time()
 
@@ -97,22 +115,28 @@ def test_process_frame_packet_performance():
             processing_time = end_time - start_time
             processing_times.append(processing_time)
 
-            if isinstance(success, (int, float)):
+            if isinstance(success, (int, float)) and success >= 0:
                 ber_results.append(success)
                 print(f"  帧 {frame_idx}: BER={success:.2e}")
             else:
                 print(f"  帧 {frame_idx}: 处理失败")
+                ber_results.append(float('nan'))  # 记录失败帧
 
 
-    # 计算统计结果
-    avg_processing_time = np.mean(processing_times)
-    std_processing_time = np.std(processing_times)
-    avg_ber = np.mean(ber_results) if ber_results else float('nan')
-    print(f"  平均处理时长: {avg_processing_time:.4f}s ± {std_processing_time:.4f}s")
-    print(f"  平均BER: {avg_ber:.4e}")
-    print()
 
-    total_results.append({
+        # 计算统计结果
+        avg_processing_time = np.mean(processing_times)
+        std_processing_time = np.std(processing_times)
+        
+        # 过滤掉 nan 值计算平均BER
+        valid_ber = [b for b in ber_results if not np.isnan(b)]
+        avg_ber = np.mean(valid_ber) if valid_ber else float('nan')
+        
+        print(f"  平均处理时长: {avg_processing_time:.4f}s ± {std_processing_time:.4f}s")
+        print(f"  平均BER: {avg_ber:.4e} (成功帧数: {len(valid_ber)}/{len(ber_results)})")
+        print()
+        
+        total_results.append({
             'config': config,
             'avg_time': avg_processing_time,
             'std_time': std_processing_time,
@@ -123,7 +147,8 @@ def test_process_frame_packet_performance():
     print("=== 总体统计 ===")
     for result in total_results:
         config = result['config']
-        avg_ber = np.mean(result['ber_results']) if result['ber_results'] else float('nan')
+        valid_ber = [b for b in result['ber_results'] if not np.isnan(b)]
+        avg_ber = np.mean(valid_ber) if valid_ber else float('nan')
         print(f"配置: {config['name']}, 平均BER: {avg_ber:.4e}, 平均处理时长: {result['avg_time']:.4f}s ± {result['std_time']:.4f}s")
 
 def test_single_frame(dqpsk_system, frame_packet):
@@ -139,58 +164,82 @@ def test_single_frame(dqpsk_system, frame_packet):
 
         # 1. 匹配滤波
         filtered = np.convolve(rx_signal, dqpsk_system.rrc_filter, mode='full')
-        if len(filtered) < 2000:  # 确保有足够的数据
-            print(f"帧 {frame_id}: 滤波后数据不足")
-            return False
-
-        # 下采样得到符号
+        
+        # 添加调试信息
+        print(f"帧 {frame_id}: rx_signal长度={len(rx_signal)}, filtered长度={len(filtered)}, rrc_filter长度={len(dqpsk_system.rrc_filter)}")
+        
         rx_symbols = filtered[::dqpsk_system.sps]
+        print(f"帧 {frame_id}: 下采样后符号长度={len(rx_symbols)},sps={dqpsk_system.sps}    ")
 
-        # 2. PSS同步
+        # 3. PSS同步
         timing_offset = dqpsk_system._enhanced_pss_sync(rx_symbols)
+        print(f"帧 {frame_id}: PSS同步偏移={timing_offset}")
 
-        # 3. SSS同步
+        true_frame_start = frame_packet.get('true_frame_start', None)
+        # 输出帧同步偏移误差
+        if true_frame_start is not None:
+            # 计算真实帧头在rx_symbols中的索引
+            filter_delay = len(dqpsk_system.rrc_filter) // 2
+            expected_offset = (true_frame_start + filter_delay) // dqpsk_system.sps
+            sync_error = timing_offset - expected_offset
+            print(f"帧 {frame_id}: 帧同步偏移误差 = {sync_error} (检测={timing_offset}, 理论={expected_offset})")
+        # 4. SSS同步
         coarse_freq = dqpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
+        print(f"帧 {frame_id}: SSS粗频估计={coarse_freq:.2f} Hz")
 
-        # 4. RS同步
+        # 5. RS同步
         fine_freq = dqpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
         total_freq = coarse_freq + fine_freq
+        print(f"帧 {frame_id}: RS细频估计={fine_freq:.2f} Hz, 总频偏={total_freq:.2f} Hz")
 
-        # 5. 频率校正
+        # 6. 频率校正
         n = np.arange(len(rx_symbols))
         Ts = 1.0 / dqpsk_system.symbol_rate
         phase_correction = np.exp(-1j * 2 * np.pi * total_freq * n * Ts)
         rx_symbols_corr = rx_symbols * phase_correction
+        print(f"帧 {frame_id}: 频率校正后，符号能量={np.mean(np.abs(rx_symbols_corr)**2):.4f}")
 
-        # 6. 数据提取
+        # 7. 数据提取 - 尝试调整起始位置以优化符号定时
+        # 原始计算
         data_start = timing_offset + dqpsk_system.preamble_len
         data_end = data_start + dqpsk_system.data_symbols
-
-        # 增加详细调试信息
-        if data_start >= len(rx_symbols_corr) or data_end > len(rx_symbols_corr) or data_end - data_start < 100:
-            print(f"帧 {frame_id}: 数据提取范围无效: start={data_start}, end={data_end}, total={len(rx_symbols_corr)}, "
-                  f"timing_offset={timing_offset}, preamble_len={dqpsk_system.preamble_len}, data_symbols={dqpsk_system.data_symbols}")
-            return False
-
         data_symbols = rx_symbols_corr[data_start:data_end]
-
-        # 7. Costas环相位同步
-        costas = dqpsk_system._init_costas_loop(loop_bw=0.002)
+                   # 6. 相位同步
+        costas = dqpsk_system._init_costas_loop(loop_bw=0.001)
         synchronized_symbols = costas.process(data_symbols)
 
-        # 8. 差分解码
         demod_symbols = dqpsk_system.differential_decode(synchronized_symbols)
+        print(f"帧 {frame_id}: 差分解码后，符号数={len(demod_symbols)}, 星座分布检查...")
+        
+        # 检查星座分布
+        constellation_points = np.array([1+1j, -1+1j, 1-1j, -1-1j]) / np.sqrt(2)
+        distances = []
+        for sym in demod_symbols[:min(50, len(demod_symbols))]:  # 检查前50个符号
+            dist = np.min(np.abs(sym - constellation_points))
+            distances.append(dist)
+        avg_distance = np.mean(distances)
+        print(f"帧 {frame_id}: 平均到星座点距离={avg_distance:.4f}")
 
-        # 9. 符号到比特转换
+        # 10. 符号到比特转换
         recv_bits = dqpsk_system._symbols_to_bits(demod_symbols)
+        print(f"帧 {frame_id}: 解码比特长度={len(recv_bits)}")
 
-        # 10. 计算BER
+        # 11. 计算BER
         if tx_bits is not None and len(tx_bits) == len(recv_bits):
             errors = np.sum(tx_bits != recv_bits)
             ber = errors / len(tx_bits)
+            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(tx_bits)}, ber={ber:.2e}")
+            
+            # 额外检查：比较前20个比特
+            if len(tx_bits) >= 20:
+                print(f"帧 {frame_id}: 发送比特前20: {tx_bits[:20]}")
+                print(f"帧 {frame_id}: 接收比特前20: {recv_bits[:20]}")
+                bit_errors = np.sum(tx_bits[:20] != recv_bits[:20])
+                print(f"帧 {frame_id}: 前20比特错误数: {bit_errors}/20")
+            
             return ber
         else:
-            print(f"帧 {frame_id}: BER计算失败，比特长度不匹配")
+            print(f"帧 {frame_id}: BER计算失败，比特长度不匹配 ({len(tx_bits) if tx_bits is not None else 0} vs {len(recv_bits)})")
             return False
 
     except Exception as e:

@@ -13,7 +13,7 @@ import pickle
 import sys
 import multiprocessing
 from multiprocessing.managers import BaseManager
-from dqpsk_system import USRP_DQPSK_System, EnhancedCostasLoop
+from dqpsk_system import USRP_DQPSK_System
 from simulation_manager import SimulationManager, SimulationIPC
 
 # PyQt5 GUI imports
@@ -234,7 +234,7 @@ class ProcessingProgram:
 
         # 初始化DQPSK系统
         self.qpsk_system = USRP_DQPSK_System(
-            mode="simulation",  # 处理程序不需要硬件访问
+            mode=self.mode,  # 处理程序不需要硬件访问
             center_freq=900e6,
             samp_rate=getattr(args, 'rate', 1e6),
             sps=2,
@@ -266,7 +266,7 @@ class ProcessingProgram:
             raise ValueError(f"不支持的IPC模式: {self.ipc_mode}")
 
         # 处理相关 - 添加同步状态保持
-        self.costas_loop = EnhancedCostasLoop(loop_bw=0.005, damping=0.707, detector_type='decision_directed')
+        self.costas_loop =self.qpsk_system._init_costas_loop(loop_bw=0.001)
         self.sync_state = {
             'freq_offset': 0.0,
             'phase_offset': 0.0,
@@ -374,12 +374,6 @@ class ProcessingProgram:
 
                 # 提取数据包内容
                 frame_id, tx_signal, rx_signal, tx_bits, timestamp, metadata = SimulationIPC.extract_packet_data(packet)
-
-                # 调试信息
-                print(f"调试: packet类型={type(packet)}, rx_signal类型={type(rx_signal)}")
-                if rx_signal is not None:
-                    print(f"调试: rx_signal形状={rx_signal.shape if hasattr(rx_signal, 'shape') else '无shape'}, 长度={len(rx_signal) if hasattr(rx_signal, '__len__') else '无长度'}")
-
                 if rx_signal is not None and len(rx_signal) > 0:
                     # 验证rx_signal是有效的numpy数组
                     if not isinstance(rx_signal, np.ndarray):
@@ -399,7 +393,7 @@ class ProcessingProgram:
                         'timestamp': timestamp,
                         'metadata': metadata.copy() if metadata else {}
                     }
-
+                    
                     # 将完整帧数据包放入处理队列
                     try:
                         self.processing_queue.put(frame_packet, timeout=1.0)
@@ -581,7 +575,7 @@ class ProcessingProgram:
             process_data = self.raw_sample_buffer[:num_samples]
 
             # 1. 匹配滤波
-            filtered = np.convolve(process_data, self.qpsk_system.rrc_filter, mode='valid')
+            filtered = np.convolve(process_data, self.qpsk_system.rrc_filter, mode='full')
             if len(filtered) < 1000:  # 确保有足够的数据
                 return False
 
@@ -705,7 +699,7 @@ class ProcessingProgram:
             print(f"处理帧 {frame_id}: {len(rx_signal)} 样本")
 
             # 1. 匹配滤波
-            filtered = np.convolve(rx_signal, self.qpsk_system.rrc_filter, mode='valid')
+            filtered = np.convolve(rx_signal, self.qpsk_system.rrc_filter, mode='full')
             if len(filtered) < self.qpsk_system.frame_len // 2:  # 确保有足够的数据
                 print(f"帧 {frame_id}: 滤波后数据不足")
                 return False
@@ -716,37 +710,16 @@ class ProcessingProgram:
             # 2. PSS同步 - 寻找最佳同步位置
             timing_offset = self.qpsk_system._enhanced_pss_sync(rx_symbols)
 
-            # 3. 验证同步质量
-            pss_conj = np.conj(self.qpsk_system.pss[::-1])
-            corr = np.correlate(rx_symbols, pss_conj, mode='full')
-            sync_peak = np.max(np.abs(corr))
-            sync_quality = sync_peak / (np.mean(np.abs(corr)) + 1e-12)
-
-            # 更新同步质量历史
-            self.sync_state['sync_quality_history'].append(sync_quality)
-            if len(self.sync_state['sync_quality_history']) > 10:
-                self.sync_state['sync_quality_history'].pop(0)
-
-            # 同步质量阈值判断
-            avg_sync_quality = np.mean(self.sync_state['sync_quality_history'])
-            if avg_sync_quality < 0.2:  # 降低阈值，提高同步成功率
-                print(f"帧 {frame_id}: 同步质量不足: 当前={sync_quality:.2f}, 平均={avg_sync_quality:.2f}")
-                return False
-
-            print(f"帧 {frame_id}: 同步成功: 质量={sync_quality:.2f}, 偏移={timing_offset}")
-
-            # 4. 频率同步
+            # 3. 频率同步
             coarse_freq = self.qpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
             fine_freq = self.qpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
             total_freq = coarse_freq + fine_freq
 
-            # 更新频率偏移状态
-            self.sync_state['freq_offset'] = 0.9 * self.sync_state['freq_offset'] + 0.1 * total_freq
 
             # 5. 频率校正
             Ts = 1.0 / self.args.rate
             n = np.arange(len(rx_symbols))
-            phase_correction = np.exp(-1j * 2 * np.pi * self.sync_state['freq_offset'] * n * Ts)
+            phase_correction = np.exp(-1j * 2 * np.pi * total_freq['freq_offset'] * n * Ts)
             rx_corrected = rx_symbols * phase_correction
 
             # 6. 提取数据符号

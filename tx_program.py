@@ -5,7 +5,7 @@ import queue
 import time
 import argparse
 import multiprocessing
-from dqpsk_system import USRP_DQPSK_System
+from usrp_multiprocess.dqpsk_system import USRP_DQPSK_System
 from simulation_manager import SimulationManager, SimulationIPC
 
 def generate_bits(mode="random", num_bits=1000):
