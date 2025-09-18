@@ -103,7 +103,7 @@ class TXProgram:
                 # 放入队列
                 self.tx_buffer_queue.put(tx_signal, timeout=0.1)
                 # 生产间隔
-                time.sleep(0.6)  # 100ms间隔
+                time.sleep(0.4)  # 100ms间隔
 
             except queue.Full:
                 print("发射缓冲区已满，等待消费...")
@@ -139,7 +139,7 @@ class TXProgram:
 
                 # 从队列取数据
                 if self.tx_buffer_queue.empty():
-                    time.sleep(0.01)
+                    time.sleep(0.001)
                     continue
 
                 tx_signal = self.tx_buffer_queue.get(timeout=0.1)
@@ -220,7 +220,7 @@ def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK发射程序")
     parser.add_argument("--tx_freq", type=float, default=915e6, help="发射频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--tx_gain", type=float, default=50, help="发射增益 (dB)")
+    parser.add_argument("--tx_gain", type=float, default=60, help="发射增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210", help="USRP设备参数")
     parser.add_argument("--repeat_count", type=int, default=30, help="每个帧重复发送次数")
     parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式")

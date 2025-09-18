@@ -60,14 +60,14 @@ class RXProgram:
             self.rx_streamer = None
 
         # 环形缓冲区设计
-        self.buffer_size = max(args.buffer_size, 20000)  # 确保最小20000样本
+        self.buffer_size = max(args.buffer_size, 500000)  # 确保最小20000样本
         self.rx_buffer = np.zeros(self.buffer_size, dtype=np.complex64)
         self.buffer_head = 0  # 写入指针
         self.buffer_tail = 0  # 读取指针
         self.buffer_lock = threading.Lock()  # 保护环形缓冲区
 
         # 发送块大小（连续读取的长度）
-        self.send_block_size =2500  # 每次发送3000个复数样本
+        self.send_block_size =3000  # 每次发送3000个复数样本
 
         # IPC相关
         self.ipc_mode = args.ipc_mode
@@ -299,7 +299,7 @@ class RXProgram:
             return
 
         # 快速接收缓冲区
-        fast_recv_buffer_size = 2040
+        fast_recv_buffer_size = 2000
         recv_buffer = np.zeros((1, fast_recv_buffer_size), dtype=np.complex64)
         metadata = uhd.types.RXMetadata()
 
@@ -314,8 +314,8 @@ class RXProgram:
             if self.rx_enabled.is_set():
                 try:
                     # 接收数据
-                    num_samps = self.rx_streamer.recv(recv_buffer, metadata, timeout=0.5)
-
+                    num_samps = self.rx_streamer.recv(recv_buffer, metadata, timeout=0.1)
+                    #print(f"接收样本数: {num_samps}, 错误代码: {metadata.error_code}")
                     if num_samps > 0:
                         samples = recv_buffer[0][:num_samps].copy()
                         self.rx_samples_received += num_samps
@@ -325,12 +325,11 @@ class RXProgram:
                         signal_power = np.mean(np.abs(samples[::step])**2)
 
                         # 功率阈值判断
-                        if signal_power < 0.05:
+                        if signal_power < 0.01:
                             self.noise_discard_count += 1
-                            
                             continue
                         self._write_to_buffer(samples)
-
+                        print(f"接收: 样本 {self.rx_samples_received}, 噪声丢弃 {self.noise_discard_count}, 溢出 {self.overflow_count}, 当前功率 {signal_power:.4f}")
                     # 检查UHD错误
                     if metadata.error_code != 0:
                         if monitor_count % 1000 == 0:
@@ -373,8 +372,8 @@ class RXProgram:
                     elif self.ipc_mode == "queue" and self.ipc_queue:
                         # 使用Queue发送
                         try:
-                            self.ipc_queue.put(data_block, timeout=1.0)
-                            print(f"Queue发送: 数据块大小 {len(data_block)}")
+                            self.ipc_queue.put(data_block, timeout=0.1)
+                            #print(f"Queue发送: 数据块大小 {len(data_block)}")
                         except queue.Full:
                             print("Queue满，丢弃数据块")
                         except Exception as e:
@@ -483,7 +482,7 @@ def main():
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--rx_gain", type=float, default=40, help="接收增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210_01", help="USRP设备参数")
-    parser.add_argument("--buffer_size", type=int, default=10000, help="接收缓冲区大小")
+    parser.add_argument("--buffer_size", type=int, default=50000, help="接收缓冲区大小")
     parser.add_argument("--udp_host", type=str, default="127.0.0.1", help="UDP通信主机地址")
     parser.add_argument("--udp_port", type=int, default=12345, help="UDP通信端口")
     parser.add_argument("--ipc_mode", type=str, default="queue", choices=["udp", "queue"], help="IPC模式：udp 或 queue")

@@ -460,7 +460,7 @@ class ProcessingProgram:
             self.raw_sample_buffer = np.append(self.raw_sample_buffer, samples)
             self.raw_buffer_index += len(samples)
 
-            min_process_samples = 2500  # 最少需要2500样本进行有效同步
+            min_process_samples = 4000  # 最少需要2500样本进行有效同步
             overlap_samples = 1000  # 重叠样本，避免帧边界问题
 
             # 当有足够数据时进行处理
@@ -504,7 +504,8 @@ class ProcessingProgram:
 
             # 1. 匹配滤波
             filtered = np.convolve(process_data, self.qpsk_system.rrc_filter, mode='full')
-            if len(filtered) < 1000:  # 确保有足够的数据
+            if len(filtered) < 1500:  # 确保有足够的数据
+                print("数据不足，等待更多数据")
                 return False
 
             rx_symbols = filtered[::self.qpsk_system.sps]
@@ -525,7 +526,7 @@ class ProcessingProgram:
 
             # 同步质量阈值判断
             avg_sync_quality = np.mean(self.sync_state['sync_quality_history'])
-            if avg_sync_quality < 0.3:  # 降低阈值，提高同步成功率
+            if avg_sync_quality < 2:  # 降低阈值，提高同步成功率
                 print(f"同步质量不足: 当前={sync_quality:.2f}, 平均={avg_sync_quality:.2f}")
                 return False
 
