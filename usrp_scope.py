@@ -1,3 +1,13 @@
+
+# usrp_scope.py
+# ---------------------------------------------
+# 用途说明：
+# 本文件为独立的USRP自收自发示波器/频谱仪工具，
+# 主要用于无线信号链路测试、硬件调试和信号可视化。
+# 可实时显示发射/接收时域波形和接收信号频谱。
+# 与主程序无关，仅供实验和调试使用。
+# ---------------------------------------------
+
 import threading
 import time
 import numpy as np
@@ -25,6 +35,19 @@ def parse_args():
     parser.add_argument('--roll_off', type=float, default=0.35, help='Roll-off factor')
     return parser.parse_args()
 
+# 频谱功率谱密度计算函数（参考rx_spectrum_to_pyplot.py）
+def psd(nfft: int, samples: np.ndarray) -> np.ndarray:
+    window = np.hamming(nfft)
+    fft = np.fft.fft(samples * window)
+    window_power = sum(window * window) / nfft
+    logfft = (
+        20 * np.log10(np.abs(np.fft.fftshift(fft)) + 1e-12)  # 防止log(0)
+        - 10 * np.log10(window_power)
+        - 20 * np.log10(nfft)
+        + 3
+    )
+    return logfft
+
 class USRPScope:
     def __init__(self, args):
         self.args = args
@@ -36,6 +59,12 @@ class USRPScope:
         self.rx_enabled = threading.Event()
         self.tx_time_data = np.array([])
         self.rx_time_data = np.array([])
+        # 频谱相关
+        self.rx_spectrum_data = np.zeros(1024)
+        self.spectrum_freqs = np.zeros(1024)
+        self.spectrum_nfft = 1024
+        self.spectrum_ref = 0
+        self.spectrum_dyn = 60
         
         # 小缓冲区 + 流水线处理
         self.buffer_size = 4096  # 小缓冲区
@@ -202,6 +231,18 @@ class USRPScope:
                 self.processing_queue.put_nowait(display_data)
             else:
                 self.stats['overflow_count'] += 1
+
+            # 频谱数据处理（只用最新一批样本计算）
+            if len(samples) >= self.spectrum_nfft:
+                # 取最新的nfft个点
+                spectrum_samples = samples[-self.spectrum_nfft:]
+                logfft = psd(self.spectrum_nfft, spectrum_samples)
+                # 频率轴
+                rx_rate = self.args.rate
+                rx_freq = self.current_rx_freq
+                freqs = (np.arange(-self.spectrum_nfft/2, self.spectrum_nfft/2, 1) / self.spectrum_nfft * rx_rate + rx_freq)
+                self.rx_spectrum_data = logfft
+                self.spectrum_freqs = freqs
                 
         except Exception as e:
             self.stats['overflow_count'] += 1
@@ -288,22 +329,31 @@ class USRPScope:
         self._run_gui()
         self.stop()
 
+
     def _run_gui(self):
-        fig, ax = plt.subplots(2, 1, figsize=(12, 8))
-        tx_line, = ax[0].plot([], [], 'r-', label='TX', linewidth=0.5)
-        rx_line, = ax[1].plot([], [], 'g-', label='RX', linewidth=0.5)
-        ax[0].set_title('TX Signal (Time Domain)')
-        ax[1].set_title('RX Signal (Time Domain)')
-        for a in ax:
+        # 三个子图：TX时域、RX时域、RX频谱
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+        tx_line, = axes[0].plot([], [], 'r-', label='TX', linewidth=0.5)
+        rx_line, = axes[1].plot([], [], 'g-', label='RX', linewidth=0.5)
+        spectrum_line, = axes[2].plot([], [], 'b-', label='RX Spectrum', linewidth=0.7)
+        axes[0].set_title('TX Signal (Time Domain)')
+        axes[1].set_title('RX Signal (Time Domain)')
+        axes[2].set_title('RX Spectrum (Power Spectral Density)')
+        for a in axes[:2]:
             a.set_xlim(0, 1000)
             a.set_ylim(-1.5, 1.5)
             a.grid(True, alpha=0.3)
             a.legend()
+        axes[2].set_xlabel('Frequency (Hz)')
+        axes[2].set_ylabel('Power Spectral Density (dB)')
+        axes[2].set_ylim(self.spectrum_ref - self.spectrum_dyn, self.spectrum_ref)
+        axes[2].grid(True, alpha=0.3)
+        axes[2].legend()
 
-        plt.subplots_adjust(bottom=0.35, hspace=0.4, top=0.9)
+        plt.subplots_adjust(bottom=0.25, hspace=0.5, top=0.93)
 
-        ax_tx_gain = plt.axes([0.1, 0.25, 0.35, 0.025])
-        ax_rx_gain = plt.axes([0.55, 0.25, 0.35, 0.025])
+        ax_tx_gain = plt.axes([0.1, 0.16, 0.35, 0.025])
+        ax_rx_gain = plt.axes([0.55, 0.16, 0.35, 0.025])
 
         self.slider_tx_gain = Slider(ax_tx_gain, 'TX Gain (dB)', 0, 89, valinit=self.current_tx_gain)
         self.slider_rx_gain = Slider(ax_rx_gain, 'RX Gain (dB)', 0, 76, valinit=self.current_rx_gain)
@@ -311,10 +361,10 @@ class USRPScope:
         self.slider_tx_gain.on_changed(self.update_tx_gain)
         self.slider_rx_gain.on_changed(self.update_rx_gain)
 
-        ax_tx_start = plt.axes([0.1, 0.08, 0.12, 0.04])
-        ax_tx_stop = plt.axes([0.25, 0.08, 0.12, 0.04])
-        ax_rx_start = plt.axes([0.4, 0.08, 0.12, 0.04])
-        ax_rx_stop = plt.axes([0.55, 0.08, 0.12, 0.04])
+        ax_tx_start = plt.axes([0.1, 0.06, 0.12, 0.04])
+        ax_tx_stop = plt.axes([0.25, 0.06, 0.12, 0.04])
+        ax_rx_start = plt.axes([0.4, 0.06, 0.12, 0.04])
+        ax_rx_stop = plt.axes([0.55, 0.06, 0.12, 0.04])
 
         self.btn_tx_start = Button(ax_tx_start, 'TX ON')
         self.btn_tx_stop = Button(ax_tx_stop, 'TX OFF')
@@ -327,22 +377,28 @@ class USRPScope:
         self.btn_rx_stop.on_clicked(self.stop_rx)
 
         def update(frame):
-            # 快速更新显示
+            # 时域
             tx = self.tx_time_data[-1000:] if len(self.tx_time_data) >= 1000 else self.tx_time_data
             rx = self.rx_time_data[-1000:] if len(self.rx_time_data) >= 1000 else self.rx_time_data
-            
             tx_line.set_data(np.arange(len(tx)), tx)
             rx_line.set_data(np.arange(len(rx)), rx)
-            
             # 动态调整显示范围
             if len(rx) > 0:
                 rx_max = np.max(np.abs(rx)) * 1.2
-                if rx_max > 0.01:  # 避免过小的范围
-                    ax[1].set_ylim(-rx_max, rx_max)
-            
-            return tx_line, rx_line
+                if rx_max > 0.01:
+                    axes[1].set_ylim(-rx_max, rx_max)
+            # 频谱
+            if self.spectrum_freqs is not None and self.rx_spectrum_data is not None:
+                spectrum_line.set_data(self.spectrum_freqs, self.rx_spectrum_data)
+                if len(self.rx_spectrum_data) > 0:
+                    # 修复警告：避免xlim低高相等
+                    x0 = self.spectrum_freqs[0]
+                    x1 = self.spectrum_freqs[-1]
+                    if x0 != x1:
+                        axes[2].set_xlim(x0, x1)
+            return tx_line, rx_line, spectrum_line
 
-        ani = animation.FuncAnimation(fig, update, interval=30, blit=True, save_count=50)  # 30ms刷新
+        ani = animation.FuncAnimation(fig, update, interval=60, blit=True, save_count=50)
         plt.show()
 
     def stop(self):
