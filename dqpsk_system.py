@@ -110,7 +110,7 @@ class USRP_DQPSK_System:
         self.pss = self._generate_pss()
         self.sss = self._generate_sss()
         self.rs = self._generate_rs()
-
+        self.frame_header = np.concatenate([self.pss, self.sss, self.rs])
         # QPSK constellation (Gray coded) - 与原始系统保持一致
         self.constellation = np.array([
             1 + 1j,  # 00
@@ -175,8 +175,8 @@ class USRP_DQPSK_System:
     def _calculate_ber(self, tx_bits, rx_bits):
         """计算误比特率"""
         if len(tx_bits) != len(rx_bits):
-            if self.verbose:
-                print(f"比特长度不匹配: 发送 {len(tx_bits)}, 接收 {len(rx_bits)}")
+            #if self.verbose:
+            print(f"比特长度不匹配: 发送 {len(tx_bits)}, 接收 {len(rx_bits)}")
             return 0.0  # 长度不匹配时返回0（或根据需要调整）
         errors = np.sum(tx_bits != rx_bits)
         return errors / len(tx_bits)
@@ -370,7 +370,7 @@ class USRP_DQPSK_System:
     # 同步相关方法（保持不变）
     def _enhanced_pss_sync(self, rx_symbols):
         """增强型PSS符号定时同步，带插值优化"""
-        corr = np.correlate(rx_symbols, self.pss, mode='valid')
+        corr = np.correlate(rx_symbols, self.frame_header, mode='valid')
         corr_power = np.abs(corr)**2
         max_idx = np.argmax(corr_power)
         if max_idx > 0 and max_idx < len(corr_power) - 1:
@@ -400,7 +400,7 @@ class USRP_DQPSK_System:
         freq_phase_diff = np.angle(np.exp(1j * freq_phase_diff))
         freq_est1 = np.mean(freq_phase_diff) / (2 * np.pi * self.Ts)
         # 方法2: 基于相关的频率估计
-        freq_search = np.linspace(-10000/2, 10000/2, 500)
+        freq_search = np.linspace(-1000/2, 1000/2, 500)
         corr_values = []
         for f_test in freq_search:
             n = np.arange(len(rx_sss))

@@ -21,6 +21,10 @@ class RXProgram:
         self.running = threading.Event()
         self.rx_enabled = threading.Event()
 
+        # 仿真/发射参数
+        self.repeat_count = getattr(args, 'repeat_count', 10)
+        self.gap_len = getattr(args, 'gap_len', 200)
+
         # 检测运行模式
         self.mode = getattr(args, 'mode', 'hardware')
 
@@ -42,6 +46,16 @@ class RXProgram:
             self.usrp = None
             self.rx_streamer = None
 
+            # 数据记录相关（仿真模式下支持）
+            self.record_file = getattr(args, 'record_file', None)
+            self.record_fp = None
+            if self.record_file:
+                try:
+                    self.record_fp = open(self.record_file, 'wb')
+                    print(f"仿真接收数据将保存至: {self.record_file}")
+                except Exception as e:
+                    print(f"无法打开记录文件 {self.record_file}: {e}")
+                    self.record_fp = None
         else:
             # 硬件模式
             self.qpsk_system = USRP_DQPSK_System(
@@ -58,6 +72,9 @@ class RXProgram:
             # USRP相关
             self.usrp = None
             self.rx_streamer = None
+            # 硬件模式下不记录数据
+            self.record_file = None
+            self.record_fp = None
 
         # 环形缓冲区设计
         self.buffer_size = max(args.buffer_size, 500000)  # 确保最小20000样本
@@ -248,39 +265,59 @@ class RXProgram:
             self._rx_hardware_thread_func()
 
     def _rx_simulation_thread_func(self):
-        """仿真模式接收线程"""
-
+        """仿真模式接收线程（模拟真实发射逻辑：帧重复+间隔+整体信道效应+分块）"""
         frame_id = 0
+        block_size = 2040
         while self.running.is_set():
             try:
-                # 生成仿真信号数据
-                # 创建一个简单的QPSK信号作为测试
-                frame, tx_bits = self.qpsk_system .generate_frame(return_bits=True)
-                tx_signal = self.qpsk_system .prepare_tx_signal(frame)
+                # 生成一帧基带信号
+                frame, tx_bits = self.qpsk_system.generate_frame(return_bits=True)
+                tx_signal = self.qpsk_system.prepare_tx_signal(frame)
 
+                # 拼接repeat_count次，每次之间插入gap_len个0
+                tx_stream = []
+                for i in range(self.repeat_count):
+                    tx_stream.append(tx_signal)
+                    if i < self.repeat_count - 1:
+                        tx_stream.append(np.zeros(self.gap_len, dtype=tx_signal.dtype))
+                tx_stream = np.concatenate(tx_stream)
 
-                # 应用仿真信道效应
-                rx_signal = self._apply_simulation_channel(tx_signal)
-                snr_db = getattr(self.args, 'snr_db', 15.0)  # 信噪比
-                # 生成随机QPSK符号
-                total_len = 2040
-                frame_len = len(rx_signal)
-                pad_len = total_len - frame_len
-                if pad_len > 0:
-                    pre_len = np.random.randint(0, pad_len)
-                    post_len = pad_len - pre_len
-                    signal_power = np.mean(np.abs(rx_signal)**2)
-                    noise_power = signal_power / (10**(snr_db/10))
-                    pre_noise = np.sqrt(noise_power/2) * (np.random.randn(pre_len) + 1j * np.random.randn(pre_len))
-                    post_noise = np.sqrt(noise_power/2) * (np.random.randn(post_len) + 1j * np.random.randn(post_len))
-                    rx_signal = np.concatenate([pre_noise, rx_signal, post_noise])
+                # 在发送流末尾添加一段0，模拟帧间隔期间的接收噪声（0.1秒间隔）
+                # 0.1秒 * 采样率 = 0.1 * 1e6 = 100000采样点
+                frame_interval_samples = int(0.1 * self.qpsk_system.samp_rate)
+                tx_stream = np.concatenate([tx_stream, np.zeros(frame_interval_samples, dtype=tx_signal.dtype)])
 
-                # 将处理后的信号写入环形缓冲区
-                self._write_to_buffer(rx_signal)
-                print(f"仿真接收: 帧 {frame_id} 已添加信道效应并写入缓冲区")
+                # 整体施加信道效应
+                rx_stream = self._apply_simulation_channel(tx_stream)
+
+                # 数据记录功能：一次性保存整个施加完信道效应的流
+                if self.record_fp is not None:
+                    try:
+                        rx_stream.astype(np.complex64).tofile(self.record_fp)
+                    except Exception as e:
+                        print(f"写入记录文件失败: {e}")
+
+                # 按block_size切块送入缓冲区
+                num_blocks = int(np.ceil(len(rx_stream) / block_size))
+                for blk in range(num_blocks):
+                    start = blk * block_size
+                    end = min((blk + 1) * block_size, len(rx_stream))
+                    block = rx_stream[start:end]
+                    # 只在最后一块补零
+                    if len(block) < block_size:
+                        block = np.pad(block, (0, block_size - len(block)))
+                    step = max(1, len(block) // 100)
+                    signal_power = np.mean(np.abs( block[::step])**2)
+
+                    # 功率阈值判断
+                    if signal_power < 0.1:
+                        self.noise_discard_count += 1
+                        continue
+                    self._write_to_buffer(block)
+                print(f"仿真接收: 帧 {frame_id} 已重复{self.repeat_count}次并写入缓冲区，总长度{len(rx_stream)}")
                 frame_id += 1
 
-                # 控制生成速度，避免过快
+                # 控制生成速度，模拟帧间隔
                 time.sleep(0.1)
 
             except Exception as e:
@@ -299,7 +336,7 @@ class RXProgram:
             return
 
         # 快速接收缓冲区
-        fast_recv_buffer_size = 2000
+        fast_recv_buffer_size = 2040
         recv_buffer = np.zeros((1, fast_recv_buffer_size), dtype=np.complex64)
         metadata = uhd.types.RXMetadata()
 
@@ -473,6 +510,15 @@ class RXProgram:
         if self.ipc_send_thread:
             self.ipc_send_thread.join(timeout=2)
 
+        # 关闭数据记录文件
+        if self.record_fp is not None:
+            try:
+                self.record_fp.close()
+                print(f"记录文件 {self.record_file} 已关闭")
+            except Exception as e:
+                print(f"关闭记录文件失败: {e}")
+            self.record_fp = None
+
         print("接收程序已停止")
 
 def main():
@@ -491,6 +537,9 @@ def main():
     parser.add_argument("--snr_db", type=float, default=15.0, help="仿真信道信噪比 (dB)")
     parser.add_argument("--freq_offset", type=float, default=1000.0, help="仿真信道频率偏移 (Hz)")
     parser.add_argument("--phase_offset", type=float, default=np.pi/3, help="仿真信道相位偏移 (rad)")
+    parser.add_argument("--record_file", type=str, default=None, help="可选：保存接收原始数据的二进制文件（complex64, .bin/.npy兼容）")
+    parser.add_argument("--repeat_count", type=int, default=10, help="每帧重复发送次数，仿真模式建议与tx_program一致")
+    parser.add_argument("--gap_len", type=int, default=200, help="重复帧之间的间隔采样点数，仿真模式建议与tx_program一致")
 
     args = parser.parse_args()
 

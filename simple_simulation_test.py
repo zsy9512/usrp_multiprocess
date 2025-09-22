@@ -6,6 +6,7 @@
 
 import numpy as np
 import time
+import matplotlib.pyplot as plt
 from dqpsk_system import USRP_DQPSK_System
 
 def create_frame_packet(rx_signal, tx_bits, frame_id=0):
@@ -150,7 +151,42 @@ def test_process_frame_packet_performance():
         valid_ber = [b for b in result['ber_results'] if not np.isnan(b)]
         avg_ber = np.mean(valid_ber) if valid_ber else float('nan')
         print(f"配置: {config['name']}, 平均BER: {avg_ber:.4e}, 平均处理时长: {result['avg_time']:.4f}s ± {result['std_time']:.4f}s")
+def test_from_saved_window(file_path):
+    """从保存的窗口数据文件进行同步和解调测试（数据已下采样为符号）"""
+    print(f"=== 从文件 {file_path} 加载窗口数据进行测试 ===")
 
+    # 加载窗口数据（已下采样为符号）
+    try:
+        rx_symbols = np.load(file_path)
+        print(f"加载窗口数据: 长度={len(rx_symbols)} 符号")
+    except Exception as e:
+        print(f"加载文件失败: {e}")
+        return
+
+    # 创建DQPSK系统实例
+    dqpsk_system = USRP_DQPSK_System(
+        mode="simulation",
+        samp_rate=1e6,
+        sps=2,
+        verbose=True
+    )
+
+    # 模拟帧数据包（没有tx_bits，因为是真实数据）
+    frame_packet = {
+        'frame_id': 0,
+        'rx_symbols': rx_symbols,  # 直接使用已下采样的符号
+        'tx_signal': None,
+        'tx_bits': None,
+        'timestamp': time.time(),
+        'metadata': {}
+    }
+
+    # 调用修改后的test_single_frame进行处理
+    result = test_single_frame_from_symbols(dqpsk_system, frame_packet)
+    if isinstance(result, bool) and result:
+        print("处理成功")
+    else:
+        print("处理失败")
 def test_single_frame(dqpsk_system, frame_packet):
     """测试单帧处理 - 模拟_process_frame_packet的核心逻辑"""
     try:
@@ -161,7 +197,6 @@ def test_single_frame(dqpsk_system, frame_packet):
         if rx_signal is None or len(rx_signal) == 0:
             print(f"帧 {frame_id}: 接收信号为空")
             return False
-
         # 1. 匹配滤波
         filtered = np.convolve(rx_signal, dqpsk_system.rrc_filter, mode='full')
         
@@ -237,14 +272,245 @@ def test_single_frame(dqpsk_system, frame_packet):
                 bit_errors = np.sum(tx_bits[:20] != recv_bits[:20])
                 print(f"帧 {frame_id}: 前20比特错误数: {bit_errors}/20")
             
+            # 可视化
+            plt.figure(figsize=(12, 8))
+
+            # IQ 时域数据（标注峰值）
+            plt.subplot(2, 2, 1)
+            plt.plot(np.real(rx_signal), label='I')
+            plt.plot(np.imag(rx_signal), label='Q')
+            peak_sample = timing_offset * dqpsk_system.sps
+            if peak_sample < len(rx_signal):
+                plt.axvline(peak_sample, color='r', linestyle='--', label='Detected Peak')
+            plt.title('IQ Time Domain')
+            plt.xlabel('Sample Index')
+            plt.ylabel('Amplitude')
+            plt.legend()
+
+            # 总估计频偏
+            plt.subplot(2, 2, 2)
+            plt.bar(['Coarse', 'Fine', 'Total'], [coarse_freq, fine_freq, total_freq])
+            plt.title(f'Freq Offsets: Total {total_freq:.1f} Hz')
+
+            # 最终恒定星座图
+            plt.subplot(2, 2, 3)
+            plt.scatter(np.real(demod_symbols), np.imag(demod_symbols))
+            plt.title('Demodulated Constellation')
+            plt.xlabel('I')
+            plt.ylabel('Q')
+            plt.axis('equal')
+
+            # BER
+            plt.subplot(2, 2, 4)
+            plt.text(0.5, 0.5, f'BER: {ber:.6f}', fontsize=20, ha='center', va='center')
+            plt.title('BER')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+            
             return ber
         else:
             print(f"帧 {frame_id}: BER计算失败，比特长度不匹配 ({len(tx_bits) if tx_bits is not None else 0} vs {len(recv_bits)})")
+            # 即使没有BER，也进行可视化
+            plt.figure(figsize=(12, 8))
+
+            # IQ 时域数据（标注峰值）
+            plt.subplot(2, 2, 1)
+            plt.plot(np.real(rx_signal), label='I')
+            plt.plot(np.imag(rx_signal), label='Q')
+            peak_sample = timing_offset * dqpsk_system.sps
+            if peak_sample < len(rx_signal):
+                plt.axvline(peak_sample, color='r', linestyle='--', label='Detected Peak')
+            plt.title('IQ Time Domain')
+            plt.xlabel('Sample Index')
+            plt.ylabel('Amplitude')
+            plt.legend()
+
+            # 总估计频偏
+            plt.subplot(2, 2, 2)
+            plt.bar(['Coarse', 'Fine', 'Total'], [coarse_freq, fine_freq, total_freq])
+            plt.title(f'Freq Offsets: Total {total_freq:.1f} Hz')
+
+            # 最终恒定星座图
+            plt.subplot(2, 2, 3)
+            plt.scatter(np.real(demod_symbols), np.imag(demod_symbols))
+            plt.title('Demodulated Constellation')
+            plt.xlabel('I')
+            plt.ylabel('Q')
+            plt.axis('equal')
+
+            # BER
+            plt.subplot(2, 2, 4)
+            plt.text(0.5, 0.5, 'BER: N/A', fontsize=20, ha='center', va='center')
+            plt.title('BER')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+            return True
+
+    except Exception as e:
+        print(f"帧处理错误: {str(e)}")
+        return False
+
+def test_single_frame_from_symbols(dqpsk_system, frame_packet):
+    """测试单帧处理 - 直接从符号开始（跳过匹配滤波和下采样）"""
+    try:
+        frame_id = frame_packet.get('frame_id', 'unknown')
+        rx_symbols = frame_packet.get('rx_symbols')
+        tx_bits = frame_packet.get('tx_bits')
+
+        if rx_symbols is None or len(rx_symbols) == 0:
+            print(f"帧 {frame_id}: 接收符号为空")
             return False
+        
+        print(f"帧 {frame_id}: 符号长度={len(rx_symbols)}")
+
+        # PSS同步
+        timing_offset = dqpsk_system._enhanced_pss_sync(rx_symbols)
+        print(f"帧 {frame_id}: PSS同步偏移={timing_offset}")
+
+        # SSS同步
+        coarse_freq = dqpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
+        print(f"帧 {frame_id}: SSS粗频估计={coarse_freq:.2f} Hz")
+
+        # RS同步
+        fine_freq = dqpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
+        total_freq = coarse_freq + fine_freq
+        print(f"帧 {frame_id}: RS细频估计={fine_freq:.2f} Hz, 总频偏={total_freq:.2f} Hz")
+
+        # 频率校正
+        n = np.arange(len(rx_symbols))
+        Ts = 1.0 / dqpsk_system.symbol_rate
+        phase_correction = np.exp(-1j * 2 * np.pi * total_freq * n * Ts)
+        rx_symbols_corr = rx_symbols * phase_correction
+        print(f"帧 {frame_id}: 频率校正后，符号能量={np.mean(np.abs(rx_symbols_corr)**2):.4f}")
+
+        # 数据提取
+        data_start = timing_offset + dqpsk_system.preamble_len
+        data_end = data_start + dqpsk_system.data_symbols
+        data_symbols = rx_symbols_corr[data_start:data_end]
+                   
+        # 相位同步
+        costas = dqpsk_system._init_costas_loop(loop_bw=0.001)
+        synchronized_symbols = costas.process(data_symbols)
+
+        demod_symbols = dqpsk_system.differential_decode(synchronized_symbols)
+        print(f"帧 {frame_id}: 差分解码后，符号数={len(demod_symbols)}, 星座分布检查...")
+        
+        # 检查星座分布
+        constellation_points = np.array([1+1j, -1+1j, 1-1j, -1-1j]) / np.sqrt(2)
+        distances = []
+        for sym in demod_symbols[:min(50, len(demod_symbols))]:  # 检查前50个符号
+            dist = np.min(np.abs(sym - constellation_points))
+            distances.append(dist)
+        avg_distance = np.mean(distances)
+        print(f"帧 {frame_id}: 平均到星座点距离={avg_distance:.4f}")
+
+        # 符号到比特转换
+        recv_bits = dqpsk_system._symbols_to_bits(demod_symbols)
+        print(f"帧 {frame_id}: 解码比特长度={len(recv_bits)}")
+
+        # 计算BER
+        if tx_bits is not None and len(tx_bits) == len(recv_bits):
+            errors = np.sum(tx_bits != recv_bits)
+            ber = errors / len(tx_bits)
+            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(tx_bits)}, ber={ber:.2e}")
+            
+            # 额外检查：比较前20个比特
+            if len(tx_bits) >= 20:
+                print(f"帧 {frame_id}: 发送比特前20: {tx_bits[:20]}")
+                print(f"帧 {frame_id}: 接收比特前20: {recv_bits[:20]}")
+                bit_errors = np.sum(tx_bits[:20] != recv_bits[:20])
+                print(f"帧 {frame_id}: 前20比特错误数: {bit_errors}/20")
+            
+            # 可视化
+            plt.figure(figsize=(12, 8))
+
+            # IQ 时域数据（标注峰值）
+            plt.subplot(2, 2, 1)
+            plt.plot(np.real(rx_symbols), label='I')
+            plt.plot(np.imag(rx_symbols), label='Q')
+            if timing_offset < len(rx_symbols):
+                plt.axvline(timing_offset, color='r', linestyle='--', label='Detected Peak')
+            plt.title('IQ Time Domain')
+            plt.xlabel('Symbol Index')
+            plt.ylabel('Amplitude')
+            plt.legend()
+
+            # 总估计频偏
+            plt.subplot(2, 2, 2)
+            plt.bar(['Coarse', 'Fine', 'Total'], [coarse_freq, fine_freq, total_freq])
+            plt.title(f'Freq Offsets: Total {total_freq:.1f} Hz')
+
+            # 最终恒定星座图
+            plt.subplot(2, 2, 3)
+            plt.scatter(np.real(demod_symbols), np.imag(demod_symbols))
+            plt.title('Demodulated Constellation')
+            plt.xlabel('I')
+            plt.ylabel('Q')
+            plt.axis('equal')
+
+            # BER
+            plt.subplot(2, 2, 4)
+            plt.text(0.5, 0.5, f'BER: {ber:.6f}', fontsize=20, ha='center', va='center')
+            plt.title('BER')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+            
+            return ber
+        else:
+            print(f"帧 {frame_id}: BER计算失败，比特长度不匹配 ({len(tx_bits) if tx_bits is not None else 0} vs {len(recv_bits)})")
+            # 即使没有BER，也进行可视化
+            plt.figure(figsize=(12, 8))
+
+            # IQ 时域数据（标注峰值）
+            plt.subplot(2, 2, 1)
+            plt.plot(np.real(rx_symbols), label='I')
+            plt.plot(np.imag(rx_symbols), label='Q')
+            if timing_offset < len(rx_symbols):
+                plt.axvline(timing_offset, color='r', linestyle='--', label='Detected Peak')
+            plt.title('IQ Time Domain')
+            plt.xlabel('Symbol Index')
+            plt.ylabel('Amplitude')
+            plt.legend()
+
+            # 总估计频偏
+            plt.subplot(2, 2, 2)
+            plt.bar(['Coarse', 'Fine', 'Total'], [coarse_freq, fine_freq, total_freq])
+            plt.title(f'Freq Offsets: Total {total_freq:.1f} Hz')
+
+            # 最终恒定星座图
+            plt.subplot(2, 2, 3)
+            plt.scatter(np.real(demod_symbols), np.imag(demod_symbols))
+            plt.title('Demodulated Constellation')
+            plt.xlabel('I')
+            plt.ylabel('Q')
+            plt.axis('equal')
+
+            # BER
+            plt.subplot(2, 2, 4)
+            plt.text(0.5, 0.5, 'BER: N/A', fontsize=20, ha='center', va='center')
+            plt.title('BER')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+            return True
 
     except Exception as e:
         print(f"帧处理错误: {str(e)}")
         return False
 
 if __name__ == "__main__":
-    test_process_frame_packet_performance()
+    # 运行性能测试
+    #test_process_frame_packet_performance()
+    test_from_saved_window('window_0_81743.npy')
+
+    # 示例：从保存的窗口数据文件进行同步和解调
+    # 替换为实际的文件路径，例如 'window_0_81589.npy'
+    # test_from_saved_window('window_0_81589.npy')
+

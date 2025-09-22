@@ -21,7 +21,7 @@ from dqpsk_system import USRP_DQPSK_System
 
 def parse_args():
     parser = argparse.ArgumentParser(description='USRP Scope for DQPSK Transceiver')
-    parser.add_argument('--args', default='name=MyB210', help='USRP device arguments')
+    parser.add_argument('--args', default='name=MyB210_01', help='USRP device arguments')
     parser.add_argument('--tx_freq', type=float, default=915e6, help='Transmit frequency (Hz)')
     parser.add_argument('--rx_freq', type=float, default=915e6, help='Receive frequency (Hz)')
     parser.add_argument('--rate', type=float, default=1e6, help='Sample rate (Hz)')
@@ -30,9 +30,10 @@ def parse_args():
     parser.add_argument('--tx_chan', type=int, default=0, help='Transmit channel')
     parser.add_argument('--rx_chan', type=int, default=0, help='Receive channel')
     parser.add_argument('--clock_source', default='internal', help='Clock source')
-    parser.add_argument('--time_source', default='internal', help='Time source')
-    parser.add_argument('--sps', type=int, default=8, help='Samples per symbol')
+    parser.add_argument('--time_source', default='external', help='Time source')
+    parser.add_argument('--sps', type=int, default=2, help='Samples per symbol')
     parser.add_argument('--roll_off', type=float, default=0.35, help='Roll-off factor')
+    parser.add_argument('--record_file', type=str, default=None, help='Optional: file to record received raw samples (complex64, .npy)')
     return parser.parse_args()
 
 # 频谱功率谱密度计算函数（参考rx_spectrum_to_pyplot.py）
@@ -65,6 +66,15 @@ class USRPScope:
         self.spectrum_nfft = 1024
         self.spectrum_ref = 0
         self.spectrum_dyn = 60
+
+        # 数据记录相关
+        self.record_file = args.record_file
+        self.record_fp = None
+        if self.record_file:
+            # 以二进制方式写入，后续可用numpy.fromfile读取
+            self.record_fp = open(self.record_file, 'wb')
+            # 文件头注释
+            # 可用 np.fromfile('filename', dtype=np.complex64) 读取
         
         # 小缓冲区 + 流水线处理
         self.buffer_size = 4096  # 小缓冲区
@@ -106,8 +116,14 @@ class USRPScope:
 
     def _init_usrp(self):
         self.usrp = uhd.usrp.MultiUSRP(self.args.args)
-        self.usrp.set_clock_source(self.clock_source)
-        self.usrp.set_time_source(self.time_source)
+        # self.usrp.set_clock_source("external")
+        # #self.usrp.set_clock_rate(10e6) 
+        # self.usrp.set_time_source("external")
+        self.usrp.set_clock_source("internal")
+        self.usrp.set_time_source("internal")
+        pc_time_sec = time.time()
+        uhd_time = uhd.types.TimeSpec(pc_time_sec)
+        self.usrp.set_time_now(uhd_time)
         self.usrp.set_tx_freq(uhd.types.TuneRequest(self.current_tx_freq), self.args.tx_chan)
         self.usrp.set_rx_freq(uhd.types.TuneRequest(self.current_rx_freq), self.args.rx_chan)
         self.usrp.set_tx_gain(self.current_tx_gain, self.args.tx_chan)
@@ -137,7 +153,7 @@ class USRPScope:
         tx_md.end_of_burst = False
         
         frame_count = 0
-        repeat_count = 30
+        repeat_count = 50
         
         while self.running.is_set():
             if self.tx_enabled.is_set():
@@ -151,7 +167,6 @@ class USRPScope:
                             tx_md.end_of_burst = True
                         self.tx_streamer.send(current_frame, tx_md, timeout=0.1)
                         tx_md.start_of_burst = False
-                        
                         if burst_idx == 0:
                             self.tx_time_data = np.append(self.tx_time_data, np.real(current_frame[:min(100, len(current_frame))]))
                             if len(self.tx_time_data) > 1000:
@@ -191,6 +206,10 @@ class USRPScope:
                     if num_samps > 0:
                         samples = recv_buffer[0][:num_samps]
                         self.stats['rx_samples'] += num_samps
+
+                        # 数据记录功能：保存原始复数采样
+                        if self.record_fp is not None:
+                            samples.astype(np.complex64).tofile(self.record_fp)
                         
                         # 快速噪声检测
                         signal_power = np.mean(np.abs(samples[::20])**2)  # 减少计算量
@@ -406,8 +425,13 @@ class USRPScope:
         self.tx_enabled.clear()
         self.rx_enabled.clear()
         time.sleep(0.1)
+        # 关闭数据记录文件
+        if self.record_fp is not None:
+            self.record_fp.close()
+            self.record_fp = None
 
 if __name__ == "__main__":
     args = parse_args()
     scope = USRPScope(args)
+    print("\n[INFO] USRP Scope: 可选参数 --record_file 可将接收原始数据保存为npy兼容格式，便于matlab/python后续分析。\n")
     scope.run()

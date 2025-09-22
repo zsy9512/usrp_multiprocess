@@ -70,6 +70,9 @@ class TXProgram:
             pc_time_sec = time.time()
             uhd_time = uhd.types.TimeSpec(pc_time_sec)
             self.usrp.set_time_now(uhd_time)
+            #self.usrp.set_clock_source("external")
+            #self.usrp.set_clock_rate(10e6) 
+            #self.usrp.set_time_source("external")
             print(f"USRP发射初始化完成: 频率={self.args.tx_freq/1e6:.1f}MHz, 增益={self.args.tx_gain}dB")
 
             # 创建发射流a
@@ -103,7 +106,7 @@ class TXProgram:
                 # 放入队列
                 self.tx_buffer_queue.put(tx_signal, timeout=0.1)
                 # 生产间隔
-                time.sleep(0.4)  # 100ms间隔
+                time.sleep(0.5)  # 100ms间隔
 
             except queue.Full:
                 print("发射缓冲区已满，等待消费...")
@@ -139,7 +142,7 @@ class TXProgram:
 
                 # 从队列取数据
                 if self.tx_buffer_queue.empty():
-                    time.sleep(0.001)
+                    time.sleep(0.01)
                     continue
 
                 tx_signal = self.tx_buffer_queue.get(timeout=0.1)
@@ -155,10 +158,10 @@ class TXProgram:
                 frame_count += 1
 
                 #if frame_count % 50 == 0:
-                print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
+                #print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
 
                 # 发送间隔
-                #time.sleep(0.001)  # 10ms检测间隔
+                #time.sleep(0.005)  # 10ms检测间隔
 
             except queue.Empty:
                 continue
@@ -220,9 +223,9 @@ def main():
     parser = argparse.ArgumentParser(description="USRP DQPSK发射程序")
     parser.add_argument("--tx_freq", type=float, default=915e6, help="发射频率 (Hz)")
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
-    parser.add_argument("--tx_gain", type=float, default=60, help="发射增益 (dB)")
+    parser.add_argument("--tx_gain", type=float, default=50, help="发射增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210", help="USRP设备参数")
-    parser.add_argument("--repeat_count", type=int, default=30, help="每个帧重复发送次数")
+    parser.add_argument("--repeat_count", type=int, default=10, help="每个帧重复发送次数")
     parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式")
 
     args = parser.parse_args()
