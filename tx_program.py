@@ -44,8 +44,11 @@ class TXProgram:
         self.usrp = None
         self.tx_streamer = None
 
-        # 缓冲区
-        self.tx_buffer_queue = queue.Queue(maxsize=200)
+        # TX相关 - 双数组机制：发送线程使用稳定副本，数据生成线程维护更新数组
+        self.qpsk_frames = []  # 发送线程使用的帧数组副本（稳定不变）
+        self.update_frames = []  # 数据生成线程维护的更新数组
+        self.update_lock = threading.Lock()  # 保护更新数组和交换操作
+        self._pregenerate_qpsk_frames(5)  # 预生成5个帧作为初始副本
 
         # 线程
         self.data_generation_thread = None
@@ -53,6 +56,16 @@ class TXProgram:
 
         # 当前发射比特（用于BER计算）
         self.current_tx_bits = None
+
+    def _pregenerate_qpsk_frames(self, count):
+        """预生成指定数量的DQPSK帧"""
+        self.qpsk_frames = []
+        for _ in range(count):
+            frame_symbols, _ = self.qpsk_system.generate_frame(return_bits=True)
+            tx_signal = self.qpsk_system.prepare_tx_signal(frame_symbols)
+            self.qpsk_frames.append(tx_signal.astype(np.complex64))
+        # 初始时更新数组也是相同的
+        self.update_frames = self.qpsk_frames.copy()
 
     def _init_usrp(self):
         """初始化USRP设备"""
@@ -87,30 +100,31 @@ class TXProgram:
             raise
 
     def data_generation_thread_func(self):
-        """数据生成线程：异步生产DQPSK帧"""
+        """数据生成线程：逐步更新帧数组，新帧往前挤"""
         print("数据生成线程启动")
 
         while self.running.is_set():
             try:
-                # 生成比特
+                # 生成新帧
                 bits = generate_bits(self.args.bit_generator, self.qpsk_system.data_bits)
-                
-                # 保存当前发射比特
                 self.current_tx_bits = bits.copy()
-                # 生成帧
                 frame = self.qpsk_system.generate_frame()
-
-                # 准备发送信号
                 tx_signal = self.qpsk_system.prepare_tx_signal(frame)
 
-                # 放入队列
-                self.tx_buffer_queue.put(tx_signal, timeout=0.1)
-                # 生产间隔
-                time.sleep(0.5)  # 100ms间隔
+                # 线程安全地更新数组：新帧往前挤
+                with self.update_lock:
+                    if len(self.update_frames) >= 5:
+                        # 数组满时，移除最旧的帧（挤出）
+                        self.update_frames.pop(0)
+                    # 添加新帧到末尾（新帧往前挤）
+                    self.update_frames.append(tx_signal.astype(np.complex64))
+                    
+                    # 直接更新发送线程使用的数组（原子操作）
+                    self.qpsk_frames = self.update_frames.copy()
 
-            except queue.Full:
-                print("发射缓冲区已满，等待消费...")
-                time.sleep(0.05)
+                # 生产间隔
+                time.sleep(0.5)
+
             except Exception as e:
                 print(f"数据生成错误: {str(e)}")
                 time.sleep(0.5)
@@ -118,7 +132,7 @@ class TXProgram:
         print("数据生成线程结束")
 
     def tx_thread_func(self):
-        """发射线程：从队列取数据并发送"""
+        """发射线程：只管发送第一帧，不要判断，不要等待"""
         print("发射线程启动 (硬件模式)")
 
         # 硬件模式发射逻辑
@@ -131,8 +145,17 @@ class TXProgram:
             return
 
         tx_md = uhd.types.TXMetadata()
+
+        # 等待初始帧
+        while len(self.qpsk_frames) == 0 and self.running.is_set():
+            time.sleep(0.1)
+
+        if not self.running.is_set():
+            return
+
         frame_count = 0
 
+        # 只管发送循环：每次发送第一帧
         while self.running.is_set():
             try:
                 # 等待发射使能
@@ -140,14 +163,10 @@ class TXProgram:
                     time.sleep(0.01)
                     continue
 
-                # 从队列取数据
-                if self.tx_buffer_queue.empty():
-                    time.sleep(0.01)
-                    continue
-
-                tx_signal = self.tx_buffer_queue.get(timeout=0.1)
-
-                # 重复发送
+                # 直接取第一帧发送（无需锁，无需判断）
+                tx_signal = self.qpsk_frames[0]
+                
+                # 重复发送第一帧
                 for burst_idx in range(self.args.repeat_count):
                     tx_md.start_of_burst = (burst_idx == 0)
                     tx_md.end_of_burst = (burst_idx == self.args.repeat_count - 1)
@@ -157,14 +176,9 @@ class TXProgram:
 
                 frame_count += 1
 
-                #if frame_count % 50 == 0:
-                #print(f"已发送 {frame_count} 个帧组（每组{self.args.repeat_count}次重复）")
+                # 发送完后sleep 0.5秒
+                time.sleep(0.5)
 
-                # 发送间隔
-                #time.sleep(0.005)  # 10ms检测间隔
-
-            except queue.Empty:
-                continue
             except Exception as e:
                 print(f"发射错误: {str(e)}")
                 time.sleep(0.1)

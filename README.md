@@ -1,8 +1,8 @@
 # USRP DQPSK 多进程通信系统
 
-**版本**: v1.5.0  
+**版本**: v1.7.2  
 **作者**: shengyu@hust.edu.cn  
-**更新日期**: 2025-09-17
+**更新日期**: 2025-09-23
 
 这是一个基于USRP硬件的DQPSK (Differential Quadrature Phase Shift Keying) 多进程收发系统，支持实时信号处理、同步和可视化。系统专注于硬件USRP模式，为研究和开发提供稳定的测试环境。
 
@@ -10,18 +10,23 @@
 
 ### ✅ 已完成功能
 - **硬件USRP模式**：真实的射频信号收发和处理
+- **自收自发模式**：单程序同时发射和接收（transceiver_program.py）
+- **队列服务器集成**：自动连接和管理IPC队列通信
 - **实时同步算法**：PSS/SSS同步、频率校正、Costas环相位跟踪
 - **差分解调**：完整的DQPSK信号处理链路
 - **专业GUI监控**：差分星座图、时域波形、频谱分析
 - **多进程架构**：发射、接收、处理完全分离
 - **统一IPC接口**：UDP和队列两种通信模式
+- **数据分析工具**：离线分析接收数据文件
+- **性能测试**：仿真模式性能基准测试
 
 ### 📊 当前性能状态
 
 | 模式 | BER性能 | 状态 | 备注 |
 |------|---------|------|------|
 | **仿真模式** | 7e-4 ~ 5e-3 (15dB) | ✅ **完全完成** | 性能稳定，可靠 |
-| **硬件USRP模式** | 4.89e-01 | ⚠️ **需要调整** | 缓存问题待解决 |
+| **硬件USRP模式** | 4.89e-01 | ⚠️ **需要调整** | 时钟同步问题待解决 |
+| **自收自发模式** | 待测试 | 🆕 **新增功能** | 简化实验设置 |
 
 ## 📁 项目结构
 
@@ -33,15 +38,22 @@ usrp_multiprocess/
 ├── 📡 通信程序
 │   ├── tx_program.py          # USRP发射程序 (仅硬件模式)
 │   ├── rx_program.py          # 接收程序 (硬件+仿真模式)
+│   ├── transceiver_program.py # 自收自发程序 (硬件模式)
 │   └── queue_server.py       # 队列服务器
 ├── 📊 处理程序
 │   └── processing_program.py  # 处理+GUI程序 (硬件+仿真模式)
 ├── 🚀 启动脚本
 │   └── start_experiment.py    # 统一启动脚本
 ├── 🧪 测试工具
-│   └── simple_simulation_test.py # 仿真性能测试
-└── 🔧 工具脚本
-    └── cleanup_port.py        # 端口清理工具
+│   ├── simple_simulation_test.py # 仿真性能测试
+│   └── analyze_rxdata.py      # 离线数据分析工具
+├── 🔧 工具脚本
+│   ├── cleanup_port.py        # 端口清理工具
+│   └── usrp_scope.py          # USRP示波器/频谱仪
+└── 📦 数据文件
+    ├── rxdata_sim.bin         # 仿真接收数据
+    ├── rxdata04.bin           # 硬件接收数据
+    └── __pycache__/           # Python缓存文件
 ```
 
 ## 🚀 快速开始
@@ -68,6 +80,9 @@ python queue_server.py
 python tx_program.py --tx_freq 900e6 --rate 1e6 --tx_gain 50
 python rx_program.py --mode hardware --ipc_mode queue
 python processing_program.py --mode hardware --ipc_mode queue
+
+# 自收自发模式 (推荐用于自环测试)
+python start_experiment.py --mode transceiver --tx-freq 915e6 --rx-freq 915e6 --tx-gain 50 --rx-gain 40
 ```
 
 ## 📋 模式详细说明
@@ -86,6 +101,22 @@ python processing_program.py --mode hardware --ipc_mode queue
 - 性能基准测试
 - 教育和学习目的
 
+- 快速原型开发
+
+### 📻 自收自发模式 (Transceiver Mode)
+**设计目标**：简化测试流程，合并发射和接收功能
+
+#### 核心特性
+- 单程序同时处理发射和接收
+- 多线程架构：TX线程、RX线程、IPC发送线程
+- 环形缓冲区高效数据传递
+- 自动同步发射和接收参数
+
+#### 适用场景
+- 自环测试和硬件验证
+- 简化实验设置
+- 快速原型开发
+
 ### 📡 硬件USRP模式 (Hardware Mode)
 **设计目标**：真实的射频信号收发和处理
 
@@ -99,6 +130,20 @@ python processing_program.py --mode hardware --ipc_mode queue
 - **BER性能**：仅达到4.89e-01，远高于预期
 - **根本原因**：缓存机制需要针对硬件实时性进行优化
 - **解决方案**：调整接收缓冲区大小和处理时序
+
+### 📻 自收自发模式 (Transceiver Mode)
+**设计目标**：简化测试流程，合并发射和接收功能
+
+#### 核心特性
+- 单程序同时处理发射和接收
+- 多线程架构：TX线程、RX线程、IPC发送线程
+- 环形缓冲区高效数据传递
+- 自动同步发射和接收参数
+
+#### 适用场景
+- 自环测试和硬件验证
+- 简化实验设置
+- 快速原型开发
 
 ## 🔧 安装和配置
 
@@ -125,7 +170,7 @@ python tx_program.py --mode hardware --args "name=MyB210_01"
 
 ### 统一启动脚本 (start_experiment.py)
 ```bash
---mode {simulation,hardware}  # 运行模式 (默认: simulation)
+--mode {simulation,hardware,transceiver}  # 运行模式 (默认: simulation, transceiver为自收自发模式)
 --host HOST                   # 服务器主机 (默认: 127.0.0.1)
 --port PORT                   # 服务器端口 (默认: 50000)
 --tx-freq TX_FREQ             # 发射频率 (Hz) (默认: 900e6)
@@ -155,6 +200,25 @@ python tx_program.py --mode hardware --args "name=MyB210_01"
 --buffer_size 10000           # 接收缓冲区大小
 ```
 
+### 自收自发程序参数 (transceiver_program.py)
+```bash
+--tx_freq 915e6               # 发射频率 (Hz)
+--rx_freq 915e6               # 接收频率 (Hz)
+--rate 1e6                    # 采样率 (Hz)
+--tx_gain 50                  # 发射增益 (dB)
+--rx_gain 40                  # 接收增益 (dB)
+--args "name=MyB210"          # USRP设备参数
+--buffer_size 50000           # 接收缓冲区大小
+--repeat_count 10             # 每个帧重复发送次数
+--bit_generator random        # 比特生成模式：random/zeros/ones
+--sps 2                       # 每符号采样点数
+--roll_off 0.35               # 滚降系数
+--record_file rxdata.bin      # 可选：保存接收原始数据的二进制文件
+--queue_host 127.0.0.1        # 队列服务器主机地址
+--queue_port 50000            # 队列服务器端口
+--queue_authkey queue_key     # 队列服务器认证密钥
+```
+
 ### 处理程序参数 (processing_program.py)
 ```bash
 --mode hardware               # 运行模式：hardware/simulation
@@ -170,6 +234,18 @@ python tx_program.py --mode hardware --args "name=MyB210_01"
 ```
 
 ## 🎯 实验流程
+
+### 自收自发模式流程
+```mermaid
+flowchart LR
+    A[生成DQPSK帧] --> B[USRP发射]
+    B --> C[射频自环]
+    C --> D[USRP接收]
+    D --> E[写入环形缓冲区]
+    E --> F[IPC发送到处理程序]
+    F --> G[同步解调]
+    G --> H[差分星座图显示]
+```
 
 ### 硬件模式流程
 ```mermaid
@@ -279,11 +355,126 @@ python cleanup_port.py --port <端口号>
 - ⚠️ **硬件模式待优化**：BER为4.89e-01，缓存机制需要调整
 - 📊 **性能监控增强**：实时BER显示和统计
 
+### v1.7.0 (2025-09-23)
+- ✅ **新增自收自发模式**：transceiver_program.py 单程序同时发射和接收
+- ✅ **集成启动脚本**：start_experiment.py 支持 transceiver 模式
+- ✅ **完善项目文档**：更新README到v1.7版本，详细介绍系统架构
+- ✅ **优化项目结构**：重新组织文件结构，添加数据文件目录
+- 📊 **增强功能说明**：添加数据分析工具和性能测试说明
+
+### v1.5.0 (2025-09-17)
+- ✅ 完善多进程架构和IPC通信
+- ✅ 实现完整的DQPSK同步算法
+- ✅ 添加专业GUI监控界面
+- ✅ 支持仿真和硬件USRP模式
+
 ### v1.1.0 (2025-09-16)
 - ✅ 修复队列服务器Ctrl+C退出问题
 - ✅ 优化处理程序数据接收逻辑
 - ✅ 完善队列模式通信机制
 - ✅ 改进错误处理和日志输出
+
+---
+
+## 🏗️ 系统架构详解
+
+### 核心算法 (dqpsk_system.py)
+**DQPSK调制解调系统** - 系统的算法核心
+
+#### 关键组件：
+- **帧结构**：PSS(32) + SSS(32) + RS(64) + 数据符号
+- **调制方式**：DQPSK差分相移键控，4点星座图
+- **同步算法**：
+  - PSS同步：主同步序列，定时同步
+  - SSS同步：辅同步序列，粗频率估计
+  - RS同步：参考序列，细频率估计
+- **相位同步**：Costas环，自动相位跟踪
+- **信道效应**：支持SNR、频偏、相偏模拟
+
+#### 技术特点：
+- 差分编码/解码：消除绝对相位模糊
+- RRC滤波：降低ISI，提高频谱效率
+- 多级同步：确保在恶劣信道下的稳定同步
+
+### 多进程架构
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   TX Program    │    │   RX Program    │    │Processing Program│
+│   (发射进程)    │    │   (接收进程)    │    │   (处理+GUI)    │
+│                 │    │                 │    │                 │
+│ • 生成DQPSK帧   │    │ • USRP接收数据   │    │ • 实时同步解调  │
+│ • USRP发射      │◄──►│ • 环形缓冲区     │◄──►│ • 星座图显示    │
+│ • 帧重复发送    │    │ • IPC数据发送    │    │ • BER计算       │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                        │                        │
+         └────────────────────────┼────────────────────────┘
+                                  │
+                    ┌─────────────────┐
+                    │ Queue Server   │
+                    │   (IPC中枢)    │
+                    │                │
+                    │ • 共享队列管理 │
+                    │ • 进程间通信   │
+                    └─────────────────┘
+```
+
+#### 通信机制：
+- **多进程队列**：基于multiprocessing.Queue的共享内存通信
+- **UDP备用**：可选的网络通信模式
+- **环形缓冲区**：RX进程内部的高效数据缓存
+
+### 自收自发模式架构
+```
+┌─────────────────────────────┐
+│     Transceiver Program     │
+│       (自收自发进程)        │
+├─────────────────────────────┤
+│ TX Thread  │ RX Thread      │
+│ • 生成帧    │ • USRP接收     │
+│ • USRP发射  │ • 环形缓冲区   │
+├────────────┼────────────────┤
+│           IPC Thread        │
+│         • 队列发送          │
+└─────────────────────────────┘
+```
+
+**优势**：
+- 减少进程间通信延迟
+- 简化部署和调试
+- 适合自环测试场景
+
+### 数据流图
+```
+原始比特 → 差分编码 → 脉冲成形 → USRP发射 → 无线信道 → USRP接收 → 
+匹配滤波 → 定时同步 → 频率校正 → 相位同步 → 差分解码 → 解调比特 → BER计算
+```
+
+## 📋 版本历史
+
+### v1.7.2 (2025-09-23)
+- ✨ **新增功能**：transceiver_program.py 添加数据记录功能
+- 🔧 **改进**：添加接收信号功率筛选，避免杂波占用缓冲区
+- 📊 **统计增强**：添加噪声丢弃计数显示
+- 📚 **文档更新**：更新参数配置说明
+
+### v1.7.0 (2025-09-23)
+- ✨ **新增功能**：自收自发模式 (transceiver_program.py)
+- 🔧 **改进**：start_experiment.py 支持transceiver模式
+- 📚 **文档更新**：完整的系统架构文档和使用说明
+- 🐛 **修复**：移除冗余的test_transceiver.py文件
+
+### v1.6.0 (2025-09-20)
+- ✨ **新增功能**：完整的DQPSK系统实现
+- 🔧 **改进**：多进程架构优化
+- 📚 **文档更新**：详细的README.md文档
+
+### v1.5.0 (2025-09-15)
+- ✨ **新增功能**：PSS/SSS同步算法
+- 🔧 **改进**：Costas环相位跟踪
+- 📊 **性能**：仿真模式BER达到7e-4
+
+### v1.0.0 (2025-09-01)
+- 🎯 **初始版本**：基本的USRP通信框架
 
 ---
 

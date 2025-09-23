@@ -6,6 +6,7 @@ DQPSK连续传输实验快速启动脚本
 支持模式：
 - simulation: 仿真模式，用于测试算法
 - hardware: 硬件USRP模式，用于实际信号收发
+- transceiver: 自收自发模式，合并发射和接收功能
 
 更新日期: 2025-09-17
 """
@@ -24,8 +25,8 @@ class DQPSKExperiment:
 
     def __init__(self, mode="simulation", host="127.0.0.1", port=50000):
         # 参数验证
-        if mode not in ["simulation", "hardware"]:
-            raise ValueError(f"无效的模式: {mode}，必须是 'simulation' 或 'hardware'")
+        if mode not in ["simulation", "hardware", "transceiver"]:
+            raise ValueError(f"无效的模式: {mode}，必须是 'simulation', 'hardware' 或 'transceiver'")
         
         if not isinstance(port, int) or port <= 0 or port > 65535:
             raise ValueError(f"无效的端口号: {port}，必须是 1-65535 之间的整数")
@@ -108,6 +109,27 @@ class DQPSKExperiment:
         time.sleep(2)
         return process.poll() is None
 
+    def start_transceiver_program(self):
+        """启动自收自发程序"""
+        print("📻 启动自收自发程序...")
+        cmd = [
+            sys.executable, "transceiver_program.py",
+            "--tx_freq", str(self.params["tx_freq"]),
+            "--rx_freq", str(self.params["rx_freq"]),
+            "--rate", str(self.params["rate"]),
+            "--tx_gain", str(self.params["tx_gain"]),
+            "--rx_gain", str(self.params["rx_gain"]),
+            "--args", "name=MyB210",
+            "--buffer_size", "50000",
+            "--repeat_count", "10"
+        ]
+
+        process = subprocess.Popen(cmd, cwd=os.getcwd())
+        self.processes.append(("Transceiver Program", process))
+
+        time.sleep(2)
+        return process.poll() is None
+
     def start_tx_program(self):
         """启动发射程序"""
         print("📤 启动发射程序...")
@@ -161,13 +183,20 @@ class DQPSKExperiment:
         signal.signal(signal.SIGTERM, signal_handler)
 
         try:
-            # 按顺序启动各组件
-            steps = [
-                ("队列服务器", self.start_queue_server),
-                ("处理程序", self.start_processing_program),
-                ("接收程序", self.start_rx_program),
-                ("发射程序", self.start_tx_program)
-            ]
+            # 根据模式选择启动步骤
+            if self.mode == "transceiver":
+                steps = [
+                    ("队列服务器", self.start_queue_server),
+                    ("处理程序", self.start_processing_program),
+                    ("自收自发程序", self.start_transceiver_program)
+                ]
+            else:
+                steps = [
+                    ("队列服务器", self.start_queue_server),
+                    ("处理程序", self.start_processing_program),
+                    ("接收程序", self.start_rx_program),
+                    ("发射程序", self.start_tx_program)
+                ]
 
             for step_name, step_func in steps:
                 print(f"\n🔄 {step_name}...")
@@ -334,8 +363,8 @@ class DQPSKExperiment:
 
 def main():
     parser = argparse.ArgumentParser(description="DQPSK连续传输实验启动器")
-    parser.add_argument("--mode", choices=["simulation", "hardware"],
-                       default="simulation", help="运行模式")
+    parser.add_argument("--mode", choices=["simulation", "hardware", "transceiver"],
+                       default="simulation", help="运行模式 (transceiver为自收自发模式)")
     parser.add_argument("--host", default="127.0.0.1", help="服务器主机")
     parser.add_argument("--port", type=int, default=50000, help="服务器端口")
     parser.add_argument("--tx-freq", type=float, default=900e6, help="发射频率 (Hz)")

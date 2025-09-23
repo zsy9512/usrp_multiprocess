@@ -219,8 +219,8 @@ def main():
 
                         print(f"[Window {w} in Merged {merged_start}-{merged_end}] Detected frame at {detected_start}, Freq offset: {total_freq:.2f} Hz, BER: {ber:.6f}")
 
-                        # 保存当前窗口数据整体
-                        np.save(f'window_{w}_{int(detected_start)}.npy', window)
+                        # 保存当前窗口数据整体 (已关闭)
+                        # np.save(f'window_{w}_{int(detected_start)}.npy', window)
 
                         # 展示每个窗口的详细结果
                         plt.figure(figsize=(12, 8))
