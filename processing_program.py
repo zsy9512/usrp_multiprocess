@@ -460,8 +460,8 @@ class ProcessingProgram:
             self.raw_sample_buffer = np.append(self.raw_sample_buffer, samples)
             self.raw_buffer_index += len(samples)
 
-            min_process_samples = 4000  # 最少需要2500样本进行有效同步
-            overlap_samples = 1000  # 重叠样本，避免帧边界问题
+            min_process_samples = 8000  # 提升到8000，确保有足够数据进行滑动窗口
+            overlap_samples = 2000  # 增加重叠样本
 
             # 当有足够数据时进行处理
             if self.raw_buffer_index >= min_process_samples:
@@ -469,16 +469,10 @@ class ProcessingProgram:
                 success = self._process_accumulated_samples(min_process_samples)
 
                 if success:
-                    # 处理成功，移动缓冲区窗口，保持重叠
-                    remaining_samples = self.raw_buffer_index - (min_process_samples - overlap_samples)
-                    if remaining_samples > 0:
-                        self.raw_sample_buffer = self.raw_sample_buffer[min_process_samples - overlap_samples:self.raw_buffer_index]
-                        self.raw_buffer_index = remaining_samples
-                    else:
-                        self.raw_sample_buffer = np.array([], dtype=np.complex64)
-                        self.raw_buffer_index = 0
+                    # 处理成功，缓冲区已在内部更新，无需额外移动
+                    pass
                 else:
-                    # 处理失败，移动小窗口继续尝试
+                    # 处理失败，移动小窗口继续尝试，避免死循环
                     shift_size = min_process_samples // 4
                     remaining_samples = self.raw_buffer_index - shift_size
                     if remaining_samples > 0:
@@ -497,121 +491,127 @@ class ProcessingProgram:
             return False
 
     def _process_accumulated_samples(self, num_samples):
-        """处理累积的样本数据 - 兼容UDP/硬件模式"""
+        """处理累积的样本数据 - 改进版：滑动窗口多帧检测和提取"""
         try:
-            # 获取要处理的数据
+            # 获取要处理的数据（整个缓冲区）
             process_data = self.raw_sample_buffer[:num_samples]
 
-            # 1. 匹配滤波
-            filtered = np.convolve(process_data, self.qpsk_system.rrc_filter, mode='full')
-            if len(filtered) < 1500:  # 确保有足够的数据
-                print("数据不足，等待更多数据")
-                return False
+            # 滑动窗口参数
+            frame_len_samples = 1536  # 假设帧长度（根据你的dqpsk_system调整）
+            win_len = 1800  # 窗口大小
+            step = 300  # 步长（小于帧长，保证不遗漏）
+            detected_frames = []  # 存储检测到的帧信息
 
-            rx_symbols = filtered[::self.qpsk_system.sps]
+            # 滑动窗口检测
+            for start in range(0, len(process_data) - win_len + 1, step):
+                win_end = start + win_len
+                window = process_data[start:win_end]
 
-            # 2. PSS同步 - 寻找最佳同步位置
-            timing_offset = self.qpsk_system._enhanced_pss_sync(rx_symbols)
+                # 匹配滤波
+                filtered = np.convolve(window, self.qpsk_system.rrc_filter, mode='full')
+                rx_symbols = filtered[::self.qpsk_system.sps]
 
-            # 3. 验证同步质量
-            pss_conj = np.conj(self.qpsk_system.pss[::-1])
-            corr = np.correlate(rx_symbols, pss_conj, mode='full')
-            sync_peak = np.max(np.abs(corr))
-            sync_quality = sync_peak / (np.mean(np.abs(corr)) + 1e-12)
+                # PSS同步
+                timing_offset = self.qpsk_system._enhanced_pss_sync(rx_symbols)
 
-            # 更新同步质量历史
-            self.sync_state['sync_quality_history'].append(sync_quality)
-            if len(self.sync_state['sync_quality_history']) > 10:
-                self.sync_state['sync_quality_history'].pop(0)
+                # 验证同步质量
+                pss_conj = np.conj(self.qpsk_system.pss[::-1])
+                corr = np.correlate(rx_symbols, pss_conj, mode='full')
+                sync_peak = np.max(np.abs(corr))
+                sync_quality = sync_peak / (np.mean(np.abs(corr)) + 1e-12)
 
-            # 同步质量阈值判断
-            avg_sync_quality = np.mean(self.sync_state['sync_quality_history'])
-            if avg_sync_quality < 2:  # 降低阈值，提高同步成功率
-                print(f"同步质量不足: 当前={sync_quality:.2f}, 平均={avg_sync_quality:.2f}")
-                return False
+                # 更新同步质量历史
+                self.sync_state['sync_quality_history'].append(sync_quality)
+                if len(self.sync_state['sync_quality_history']) > 10:
+                    self.sync_state['sync_quality_history'].pop(0)
 
-            print(f"同步成功: 质量={sync_quality:.2f}, 偏移={timing_offset}")
+                # 同步质量阈值判断（降低到1.0）
+                avg_sync_quality = np.mean(self.sync_state['sync_quality_history'])
+                if sync_quality > 1.0:  # 降低阈值
+                    # 计算帧在全局缓冲区中的起始位置
+                    frame_start_global = start + timing_offset * self.qpsk_system.sps
+                    frame_end_global = frame_start_global + frame_len_samples
 
-            # 4. 频率同步
-            coarse_freq = self.qpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
-            fine_freq = self.qpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
-            total_freq = coarse_freq + fine_freq
+                    # 检查帧是否完整且在缓冲区内
+                    if frame_start_global >= 0 and frame_end_global <= len(process_data):
+                        detected_frames.append((frame_start_global, frame_end_global, sync_quality, rx_symbols, timing_offset))
 
-            # 更新频率偏移状态
-            self.sync_state['freq_offset'] = 0.9 * self.sync_state['freq_offset'] + 0.1 * total_freq
+            # 按同步质量排序，优先处理高质量帧
+            detected_frames.sort(key=lambda x: x[2], reverse=True)
 
-            # 5. 频率校正
-            Ts = 1.0 / self.args.rate
-            n = np.arange(len(rx_symbols))
-            phase_correction = np.exp(-1j * 2 * np.pi * self.sync_state['freq_offset'] * n * Ts)
-            rx_corrected = rx_symbols * phase_correction
+            # 处理检测到的帧
+            processed_any = False
+            for frame_start, frame_end, sync_quality, rx_symbols, timing_offset in detected_frames:
+                try:
+                    print(f"处理帧: 位置 {frame_start}-{frame_end}, 质量 {sync_quality:.2f}")
 
-            # 6. 提取数据符号
-            data_start = timing_offset + self.qpsk_system.preamble_len
-            data_end = data_start + self.qpsk_system.data_symbols
+                    # 频率同步
+                    coarse_freq = self.qpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)
+                    fine_freq = self.qpsk_system._enhanced_rs_sync(rx_symbols, timing_offset, coarse_freq)
+                    total_freq = coarse_freq + fine_freq
+                    self.sync_state['freq_offset'] = 0.9 * self.sync_state['freq_offset'] + 0.1 * total_freq
 
-            if data_start >= len(rx_corrected) or data_end > len(rx_corrected) or data_end - data_start < 100:
-                print(f"数据提取范围无效: start={data_start}, end={data_end}, total={len(rx_corrected)}")
-                return False
+                    # 频率校正
+                    Ts = 1.0 / self.args.rate
+                    n = np.arange(len(rx_symbols))
+                    phase_correction = np.exp(-1j * 2 * np.pi * self.sync_state['freq_offset'] * n * Ts)
+                    rx_corrected = rx_symbols * phase_correction
 
-            data_symbols = rx_corrected[data_start:data_end]
+                    # 提取数据符号
+                    data_start = timing_offset + self.qpsk_system.preamble_len
+                    data_end = data_start + self.qpsk_system.data_symbols
+                    if data_start < len(rx_corrected) and data_end <= len(rx_corrected):
+                        data_symbols = rx_corrected[data_start:data_end]
 
-            # 7. Costas环相位同步
-            synchronized_symbols = self.costas_loop.process(data_symbols)
-            print(f"估计频偏: {total_freq:.2f} Hz, 相偏: {self.costas_loop.phase:.2f} rad")
+                        # Costas环、差分解码、BER等（复用现有逻辑）
+                        synchronized_symbols = self.costas_loop.process(data_symbols)
+                        demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)
+                        recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
+                        expected_bits = self.generate_bits(mode=getattr(self.args, 'bit_generator', 'random'), num_bits=len(recv_bits))
+                        if len(expected_bits) == len(recv_bits):
+                            errors = np.sum(expected_bits != recv_bits)
+                            ber = errors / len(recv_bits)
+                            self.ber_history.append(ber)
+                            if len(self.ber_history) > 50:
+                                self.ber_history.pop(0)
+                            print(f"帧 {self.total_processed_frames + 1} BER: {ber:.2e}")
 
-            # 8. 差分解码
-            demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)
+                        # 计算差分符号用于星座图
+                        diff_symbols = synchronized_symbols[1:] * np.conj(synchronized_symbols[:-1])
+                        if len(diff_symbols) > 10:
+                            avg_phase = np.mean(np.angle(diff_symbols))
+                            self.sync_state['global_phase_offset'] = 0.9 * self.sync_state['global_phase_offset'] + 0.1 * avg_phase
+                        phase_correction = np.exp(-1j * self.sync_state['global_phase_offset'])
+                        diff_symbols *= phase_correction
+                        display_constellation = diff_symbols[-500:] if len(diff_symbols) >= 500 else diff_symbols
 
-            # 9. 符号到比特转换
-            recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
+                        # 更新GUI
+                        gui_data = {
+                            'constellation': display_constellation.copy(),
+                            'time_domain': rx_corrected[data_start-100:data_start+500].copy(),
+                            'sync_quality': sync_quality,
+                            'frame_count': self.total_processed_frames
+                        }
+                        self._update_gui_data(gui_data)
 
-            # 10. 计算BER（生成期望的发射比特进行比较）
-            expected_bits = self.generate_bits(mode=getattr(self.args, 'bit_generator', 'random'), num_bits=len(recv_bits))
-            if len(expected_bits) == len(recv_bits):
-                errors = np.sum(expected_bits != recv_bits)
-                ber = errors / len(recv_bits)
-                self.ber_history.append(ber)
-                if len(self.ber_history) > 50:
-                    self.ber_history.pop(0)
-                print(f"帧 {self.total_processed_frames + 1} BER: {ber:.2e} (错误: {errors}/{len(recv_bits)})")
-            else:
-                print(f"帧 {self.total_processed_frames + 1} BER计算失败: 比特长度不匹配 ({len(expected_bits)} vs {len(recv_bits)})")
+                        self.total_processed_frames += 1
+                        processed_any = True
 
-            # 11. 计算差分符号用于固定星座图显示
-            # DQPSK的星座图应显示差分符号（相位差），以避免绝对相位旋转导致的星座图旋转
-            diff_symbols = synchronized_symbols[1:] * np.conj(synchronized_symbols[:-1])
-            
-            # 全局相位追踪：基于差分符号的平均相位更新全局偏移
-            if len(diff_symbols) > 10:
-                avg_phase = np.mean(np.angle(diff_symbols))
-                # 平滑更新全局相位偏移（类似频率偏移的更新）
-                self.sync_state['global_phase_offset'] = 0.9 * self.sync_state['global_phase_offset'] + 0.1 * avg_phase
-                print(f"全局相位偏移更新: {self.sync_state['global_phase_offset']:.4f}")
-            
-            # 应用全局相位校正到差分符号
-            phase_correction = np.exp(-1j * self.sync_state['global_phase_offset'])
-            diff_symbols *= phase_correction
-            
-            # 获取最后500个差分符号用于显示
-            display_constellation = diff_symbols[-500:] if len(diff_symbols) >= 500 else diff_symbols
+                        # 从缓冲区移除已处理帧的样本
+                        self.raw_sample_buffer = np.concatenate([
+                            self.raw_sample_buffer[:int(frame_start)],
+                            self.raw_sample_buffer[int(frame_end):]
+                        ])
+                        self.raw_buffer_index -= (frame_end - frame_start)
 
-            # 12. 更新GUI数据
-            gui_data = {
-                'constellation': display_constellation.copy(),
-                'time_domain': rx_corrected[data_start-100:data_start+500].copy(),
-                'sync_quality': sync_quality,
-                'frame_count': self.total_processed_frames
-            }
-            self._update_gui_data(gui_data)
+                        # 由于缓冲区变化，重新调整num_samples
+                        num_samples = min(num_samples, len(self.raw_sample_buffer))
 
-            self.total_processed_frames += 1
-            self.sync_state['last_valid_sync'] = self.total_processed_frames
+                except Exception as e:
+                    print(f"帧处理错误: {str(e)}")
+                    continue
 
-            if self.total_processed_frames % 50 == 0:
-                print(f"已处理帧数: {self.total_processed_frames}, 同步质量: {sync_quality:.2f}")
-
-            return True
+            return processed_any
 
         except Exception as e:
             print(f"累积样本处理错误: {str(e)}")

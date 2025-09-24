@@ -334,14 +334,7 @@ class TransceiverProgram:
                         samples = recv_buffer[0][:num_samps]
                         self.stats['rx_samples'] += num_samps
 
-                        # 噪声检测：计算信号功率
-                        # step = max(1, len(samples) // 100)
-                        # signal_power = np.mean(np.abs(samples[::step])**2)
 
-                        # # 功率阈值判断（避免接收太多杂波）
-                        # if signal_power < 0.05:
-                        #     self.stats['noise_discard_count'] += 1
-                        #     continue
 
                         # 数据记录功能：保存接收原始数据
                         if self.record_fp is not None:
@@ -349,7 +342,14 @@ class TransceiverProgram:
                                 samples.astype(np.complex64).tofile(self.record_fp)
                             except Exception as e:
                                 print(f"写入记录文件失败: {e}")
+                        #噪声检测：计算信号功率
+                        step = max(1, len(samples) // 100)
+                        signal_power = np.mean(np.abs(samples[::step])**2)
 
+                        # 功率阈值判断（避免接收太多杂波）
+                        if signal_power < 0.05:
+                            self.stats['noise_discard_count'] += 1
+                            continue
                         # 写入环形缓冲区
                         self._write_to_buffer(samples)
 
