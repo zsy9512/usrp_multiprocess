@@ -78,14 +78,14 @@ class TXProgram:
             self.usrp.set_tx_gain(self.args.tx_gain)
             self.usrp.set_tx_rate(self.args.rate)
             # 配置时钟和时序
-            self.usrp.set_clock_source("internal")
-            self.usrp.set_time_source("internal")
-            pc_time_sec = time.time()
-            uhd_time = uhd.types.TimeSpec(pc_time_sec)
-            self.usrp.set_time_now(uhd_time)
-            #self.usrp.set_clock_source("external")
+            # self.usrp.set_clock_source("internal")
+            # self.usrp.set_time_source("internal")
+            # pc_time_sec = time.time()
+            # uhd_time = uhd.types.TimeSpec(pc_time_sec)
+            # self.usrp.set_time_now(uhd_time)
+            self.usrp.set_clock_source("external")
             #self.usrp.set_clock_rate(10e6) 
-            #self.usrp.set_time_source("external")
+            self.usrp.set_time_source("external")
             print(f"USRP发射初始化完成: 频率={self.args.tx_freq/1e6:.1f}MHz, 增益={self.args.tx_gain}dB")
 
             # 创建发射流a
@@ -153,36 +153,31 @@ class TXProgram:
         if not self.running.is_set():
             return
 
-        frame_count = 0
-
         # 只管发送循环：每次发送第一帧
         while self.running.is_set():
-            try:
-                # 等待发射使能
-                if not self.tx_enabled.is_set():
-                    time.sleep(0.01)
-                    continue
+            if self.tx_enabled.is_set():
+                try:
+                    # 直接取第一帧发送（无需锁，无需判断）双数组机制:直接使用更新缓冲会引起线程竞争，所以用一个副本数组间歇性去复制数据。
+                    tx_signal = self.qpsk_frames[0]
+                    
+                    # 重复发送第一帧
+                    for burst_idx in range(self.args.repeat_count):
+                        tx_md.start_of_burst = (burst_idx == 0)
+                        if burst_idx == self.args.repeat_count - 1:
+                            tx_md.end_of_burst = True
+                        self.tx_streamer.send(tx_signal, tx_md, timeout=0.1)
+                        tx_md.start_of_burst = False #这里的三处tx_md.start_of_burst开关是必须设置，用于数据突发，否则会引起USRP下溢出 
+                    
+                    
+                    # 发送完后sleep 0.5秒
+                    time.sleep(0.5)
 
-                # 直接取第一帧发送（无需锁，无需判断）
-                tx_signal = self.qpsk_frames[0]
-                
-                # 重复发送第一帧
-                for burst_idx in range(self.args.repeat_count):
-                    tx_md.start_of_burst = (burst_idx == 0)
-                    tx_md.end_of_burst = (burst_idx == self.args.repeat_count - 1)
-
-                    # 发送数据
-                    self.tx_streamer.send(tx_signal, tx_md, timeout=0.1)
-
-                frame_count += 1
-
-                # 发送完后sleep 0.5秒
-                time.sleep(0.5)
-
-            except Exception as e:
-                print(f"发射错误: {str(e)}")
-                time.sleep(0.1)
-
+                except Exception as e:
+                    print(f"发射错误: {e}")
+                    time.sleep(0.1)
+            else:
+                time.sleep(0.01)
+        tx_md.end_of_burst = True
         print("发射线程结束")
 
     def start(self):
@@ -239,7 +234,7 @@ def main():
     parser.add_argument("--rate", type=float, default=1e6, help="采样率 (Hz)")
     parser.add_argument("--tx_gain", type=float, default=50, help="发射增益 (dB)")
     parser.add_argument("--args", type=str, default="name=MyB210", help="USRP设备参数")
-    parser.add_argument("--repeat_count", type=int, default=10, help="每个帧重复发送次数")
+    parser.add_argument("--repeat_count", type=int, default=20, help="每个帧重复发送次数")
     parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式")
 
     args = parser.parse_args()

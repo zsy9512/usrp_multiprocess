@@ -543,7 +543,7 @@ class ProcessingProgram:
             processed_any = False
             for frame_start, frame_end, sync_quality, rx_symbols, timing_offset in detected_frames:
                 try:
-                    print(f"处理帧: 位置 {frame_start}-{frame_end}, 质量 {sync_quality:.2f}")
+                    #print(f"处理帧: 位置 {frame_start}-{frame_end}, 质量 {sync_quality:.2f}")
 
                     # 频率同步
                     coarse_freq = self.qpsk_system._enhanced_sss_sync(rx_symbols, timing_offset)

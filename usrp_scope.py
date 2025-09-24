@@ -116,11 +116,11 @@ class USRPScope:
 
     def _init_usrp(self):
         self.usrp = uhd.usrp.MultiUSRP(self.args.args)
-        # self.usrp.set_clock_source("external")
+        self.usrp.set_clock_source("external")
         # #self.usrp.set_clock_rate(10e6) 
-        # self.usrp.set_time_source("external")
-        self.usrp.set_clock_source("internal")
-        self.usrp.set_time_source("internal")
+        self.usrp.set_time_source("external")
+        #self.usrp.set_clock_source("internal")
+        #self.usrp.set_time_source("internal")
         pc_time_sec = time.time()
         uhd_time = uhd.types.TimeSpec(pc_time_sec)
         self.usrp.set_time_now(uhd_time)
