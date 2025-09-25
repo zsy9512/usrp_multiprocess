@@ -197,11 +197,15 @@ class RXProgram:
             self.usrp = uhd.usrp.MultiUSRP(self.args.args)
 
             # 配置参数
-            self.usrp.set_clock_source("internal")
-            self.usrp.set_time_source("internal")
-            pc_time_sec = time.time()
-            uhd_time = uhd.types.TimeSpec(pc_time_sec)
-            self.usrp.set_time_now(uhd_time)
+            self.usrp.set_clock_source(self.args.clock_source)
+            self.usrp.set_time_source(self.args.time_source)
+            if self.args.clock_source == "internal":
+                # 内部时钟模式：设置PC时间，获取纳秒级时钟信号
+                pc_time_ns = time.time_ns()
+                full_secs = pc_time_ns // 1000000000
+                frac_secs = (pc_time_ns % 1000000000) / 1000000000.0
+                uhd_time = uhd.types.TimeSpec(full_secs, frac_secs)
+                self.usrp.set_time_now(uhd_time)
             self.usrp.set_rx_freq(uhd.types.TuneRequest(self.args.rx_freq))
             self.usrp.set_rx_gain(self.args.rx_gain)
             self.usrp.set_rx_rate(self.args.rate)
@@ -540,6 +544,8 @@ def main():
     parser.add_argument("--record_file", type=str, default=None, help="可选：保存接收原始数据的二进制文件（complex64, .bin/.npy兼容）")
     parser.add_argument("--repeat_count", type=int, default=20, help="每帧重复发送次数，仿真模式建议与tx_program一致")
     parser.add_argument("--gap_len", type=int, default=200, help="重复帧之间的间隔采样点数，仿真模式建议与tx_program一致")
+    parser.add_argument("--clock_source", type=str, default="internal", choices=["internal", "external"], help="时钟源 (internal/external)")
+    parser.add_argument("--time_source", type=str, default="internal", choices=["internal", "external"], help="时间源 (internal/external)")
 
     args = parser.parse_args()
 

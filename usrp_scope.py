@@ -29,8 +29,8 @@ def parse_args():
     parser.add_argument('--rx_gain', type=float, default=30, help='Receive gain (dB)')
     parser.add_argument('--tx_chan', type=int, default=0, help='Transmit channel')
     parser.add_argument('--rx_chan', type=int, default=0, help='Receive channel')
-    parser.add_argument('--clock_source', default='internal', help='Clock source')
-    parser.add_argument('--time_source', default='external', help='Time source')
+    parser.add_argument('--clock_source', default='internal', choices=['internal', 'external'], help='Clock source')
+    parser.add_argument('--time_source', default='internal', choices=['internal', 'external'], help='Time source')
     parser.add_argument('--sps', type=int, default=2, help='Samples per symbol')
     parser.add_argument('--roll_off', type=float, default=0.35, help='Roll-off factor')
     parser.add_argument('--record_file', type=str, default=None, help='Optional: file to record received raw samples (complex64, .npy)')
@@ -116,14 +116,15 @@ class USRPScope:
 
     def _init_usrp(self):
         self.usrp = uhd.usrp.MultiUSRP(self.args.args)
-        self.usrp.set_clock_source("external")
-        # #self.usrp.set_clock_rate(10e6) 
-        self.usrp.set_time_source("external")
-        #self.usrp.set_clock_source("internal")
-        #self.usrp.set_time_source("internal")
-        pc_time_sec = time.time()
-        uhd_time = uhd.types.TimeSpec(pc_time_sec)
-        self.usrp.set_time_now(uhd_time)
+        self.usrp.set_clock_source(self.args.clock_source)
+        self.usrp.set_time_source(self.args.time_source)
+        if self.args.clock_source == "internal":
+            # 内部时钟模式：设置PC时间，获取纳秒级时钟信号
+            pc_time_ns = time.time_ns()
+            full_secs = pc_time_ns // 1000000000
+            frac_secs = (pc_time_ns % 1000000000) / 1000000000.0
+            uhd_time = uhd.types.TimeSpec(full_secs, frac_secs)
+            self.usrp.set_time_now(uhd_time)
         self.usrp.set_tx_freq(uhd.types.TuneRequest(self.current_tx_freq), self.args.tx_chan)
         self.usrp.set_rx_freq(uhd.types.TuneRequest(self.current_rx_freq), self.args.rx_chan)
         self.usrp.set_tx_gain(self.current_tx_gain, self.args.tx_chan)

@@ -78,14 +78,20 @@ class TXProgram:
             self.usrp.set_tx_gain(self.args.tx_gain)
             self.usrp.set_tx_rate(self.args.rate)
             # 配置时钟和时序
-            # self.usrp.set_clock_source("internal")
-            # self.usrp.set_time_source("internal")
-            # pc_time_sec = time.time()
-            # uhd_time = uhd.types.TimeSpec(pc_time_sec)
-            # self.usrp.set_time_now(uhd_time)
-            self.usrp.set_clock_source("external")
-            #self.usrp.set_clock_rate(10e6) 
-            self.usrp.set_time_source("external")
+            self.usrp.set_clock_source(self.args.clock_source)
+            self.usrp.set_time_source(self.args.time_source)
+            
+            if self.args.clock_source == "internal":
+                # 内部时钟模式：设置PC时间，获取纳秒级时钟信号
+                pc_time_ns = time.time_ns()
+                full_secs = pc_time_ns // 1000000000
+                frac_secs = (pc_time_ns % 1000000000) / 1000000000.0
+                uhd_time = uhd.types.TimeSpec(full_secs, frac_secs)
+                self.usrp.set_time_now(uhd_time)
+                print(f"时钟配置: {self.args.clock_source}, 时间源: {self.args.time_source}")
+            else:
+                # 外部时钟模式
+                print(f"时钟配置: {self.args.clock_source}, 时间源: {self.args.time_source}")
             print(f"USRP发射初始化完成: 频率={self.args.tx_freq/1e6:.1f}MHz, 增益={self.args.tx_gain}dB")
 
             # 创建发射流a
@@ -236,6 +242,8 @@ def main():
     parser.add_argument("--args", type=str, default="name=MyB210", help="USRP设备参数")
     parser.add_argument("--repeat_count", type=int, default=20, help="每个帧重复发送次数")
     parser.add_argument("--bit_generator", type=str, default="random", choices=["random", "zeros", "ones"], help="比特生成模式")
+    parser.add_argument("--clock_source", type=str, default="internal", choices=["internal", "external"], help="时钟源 (internal/external)")
+    parser.add_argument("--time_source", type=str, default="internal", choices=["internal", "external"], help="时间源 (internal/external)")
 
     args = parser.parse_args()
 

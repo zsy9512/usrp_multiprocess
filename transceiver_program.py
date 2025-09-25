@@ -166,11 +166,14 @@ class TransceiverProgram:
             self.usrp = uhd.usrp.MultiUSRP(self.args.args)
 
             # 时钟和时序
-            self.usrp.set_clock_source("internal")
-            self.usrp.set_time_source("internal")
-            pc_time_sec = time.time()
-            uhd_time = uhd.types.TimeSpec(pc_time_sec)
-            self.usrp.set_time_now(uhd_time)
+            self.usrp.set_clock_source(self.args.clock_source)
+            self.usrp.set_time_source(self.args.time_source)
+            if self.args.clock_source == "internal":
+                pc_time_ns = time.time_ns()
+                full_secs = pc_time_ns // 1000000000
+                frac_secs = (pc_time_ns % 1000000000) / 1000000000.0
+                uhd_time = uhd.types.TimeSpec(full_secs, frac_secs)
+                self.usrp.set_time_now(uhd_time)
 
             # TX配置
             self.usrp.set_tx_freq(uhd.types.TuneRequest(self.args.tx_freq))
@@ -467,6 +470,8 @@ def main():
     parser.add_argument("--queue_host", type=str, default="127.0.0.1", help="队列服务器主机地址")
     parser.add_argument("--queue_port", type=int, default=50000, help="队列服务器端口")
     parser.add_argument("--queue_authkey", type=str, default="queue_key", help="队列服务器认证密钥")
+    parser.add_argument("--clock_source", type=str, default="internal", choices=["internal", "external"], help="时钟源 (internal/external)")
+    parser.add_argument("--time_source", type=str, default="internal", choices=["internal", "external"], help="时间源 (internal/external)")
 
     args = parser.parse_args()
 
