@@ -234,10 +234,9 @@ def test_single_frame(dqpsk_system, frame_packet):
         rx_symbols_corr = rx_symbols * phase_correction
         print(f"帧 {frame_id}: 频率校正后，符号能量={np.mean(np.abs(rx_symbols_corr)**2):.4f}")
 
-        # 7. 数据提取 - 尝试调整起始位置以优化符号定时
-        # 原始计算
-        data_start = timing_offset + dqpsk_system.preamble_len
-        data_end = data_start + dqpsk_system.data_symbols
+        # 7. 数据提取 - 去除帧序号和CRC部分，只提取640个符号的数据部分
+        data_start = timing_offset + dqpsk_system.preamble_len + 4 + 8  # 跳过帧序号4符号 + CRC 8符号
+        data_end = data_start + dqpsk_system.data_symbols  # 640符号
         data_symbols = rx_symbols_corr[data_start:data_end]
                    # 6. 相位同步
         costas = dqpsk_system._init_costas_loop(loop_bw=0.001)
@@ -259,17 +258,18 @@ def test_single_frame(dqpsk_system, frame_packet):
         recv_bits = dqpsk_system._symbols_to_bits(demod_symbols)
         print(f"帧 {frame_id}: 解码比特长度={len(recv_bits)}")
 
-        # 11. 计算BER
-        if tx_bits is not None and len(tx_bits) == len(recv_bits):
-            errors = np.sum(tx_bits != recv_bits)
-            ber = errors / len(tx_bits)
-            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(tx_bits)}, ber={ber:.2e}")
+        # 11. 计算BER（只对数据比特）
+        if tx_bits is not None and len(tx_bits) == 1304 and len(recv_bits) == 1280:
+            tx_data_bits = tx_bits[24:]  # 跳过帧序号8比特 + CRC 16比特
+            errors = np.sum(tx_data_bits != recv_bits)
+            ber = errors / len(recv_bits)
+            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(recv_bits)}, ber={ber:.2e}")
             
             # 额外检查：比较前20个比特
-            if len(tx_bits) >= 20:
-                print(f"帧 {frame_id}: 发送比特前20: {tx_bits[:20]}")
+            if len(tx_data_bits) >= 20:
+                print(f"帧 {frame_id}: 发送数据比特前20: {tx_data_bits[:20]}")
                 print(f"帧 {frame_id}: 接收比特前20: {recv_bits[:20]}")
-                bit_errors = np.sum(tx_bits[:20] != recv_bits[:20])
+                bit_errors = np.sum(tx_data_bits[:20] != recv_bits[:20])
                 print(f"帧 {frame_id}: 前20比特错误数: {bit_errors}/20")
             
             # 可视化
@@ -387,9 +387,9 @@ def test_single_frame_from_symbols(dqpsk_system, frame_packet):
         rx_symbols_corr = rx_symbols * phase_correction
         print(f"帧 {frame_id}: 频率校正后，符号能量={np.mean(np.abs(rx_symbols_corr)**2):.4f}")
 
-        # 数据提取
-        data_start = timing_offset + dqpsk_system.preamble_len
-        data_end = data_start + dqpsk_system.data_symbols
+        # 数据提取 - 去除帧序号和CRC部分，只提取640个符号的数据部分
+        data_start = timing_offset + dqpsk_system.preamble_len + 4 + 8  # 跳过帧序号4符号 + CRC 8符号
+        data_end = data_start + dqpsk_system.data_symbols  # 640符号
         data_symbols = rx_symbols_corr[data_start:data_end]
                    
         # 相位同步
@@ -412,17 +412,18 @@ def test_single_frame_from_symbols(dqpsk_system, frame_packet):
         recv_bits = dqpsk_system._symbols_to_bits(demod_symbols)
         print(f"帧 {frame_id}: 解码比特长度={len(recv_bits)}")
 
-        # 计算BER
-        if tx_bits is not None and len(tx_bits) == len(recv_bits):
-            errors = np.sum(tx_bits != recv_bits)
-            ber = errors / len(tx_bits)
-            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(tx_bits)}, ber={ber:.2e}")
+        # 计算BER（只对数据比特）
+        if tx_bits is not None and len(tx_bits) == 1304 and len(recv_bits) == 1280:
+            tx_data_bits = tx_bits[24:]  # 跳过帧序号8比特 + CRC 16比特
+            errors = np.sum(tx_data_bits != recv_bits)
+            ber = errors / len(recv_bits)
+            print(f"帧 {frame_id}: BER计算成功, errors={errors}, total_bits={len(recv_bits)}, ber={ber:.2e}")
             
             # 额外检查：比较前20个比特
-            if len(tx_bits) >= 20:
-                print(f"帧 {frame_id}: 发送比特前20: {tx_bits[:20]}")
+            if len(tx_data_bits) >= 20:
+                print(f"帧 {frame_id}: 发送数据比特前20: {tx_data_bits[:20]}")
                 print(f"帧 {frame_id}: 接收比特前20: {recv_bits[:20]}")
-                bit_errors = np.sum(tx_bits[:20] != recv_bits[:20])
+                bit_errors = np.sum(tx_data_bits[:20] != recv_bits[:20])
                 print(f"帧 {frame_id}: 前20比特错误数: {bit_errors}/20")
             
             # 可视化
@@ -507,8 +508,8 @@ def test_single_frame_from_symbols(dqpsk_system, frame_packet):
 
 if __name__ == "__main__":
     # 运行性能测试
-    #test_process_frame_packet_performance()
-    test_from_saved_window('window_0_81743.npy')
+    test_process_frame_packet_performance()
+    #test_from_saved_window('window_0_81743.npy')
 
     # 示例：从保存的窗口数据文件进行同步和解调
     # 替换为实际的文件路径，例如 'window_0_81589.npy'

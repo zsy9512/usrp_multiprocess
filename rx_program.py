@@ -538,7 +538,7 @@ def main():
     parser.add_argument("--freq_offset", type=float, default=1000.0, help="仿真信道频率偏移 (Hz)")
     parser.add_argument("--phase_offset", type=float, default=np.pi/3, help="仿真信道相位偏移 (rad)")
     parser.add_argument("--record_file", type=str, default=None, help="可选：保存接收原始数据的二进制文件（complex64, .bin/.npy兼容）")
-    parser.add_argument("--repeat_count", type=int, default=10, help="每帧重复发送次数，仿真模式建议与tx_program一致")
+    parser.add_argument("--repeat_count", type=int, default=20, help="每帧重复发送次数，仿真模式建议与tx_program一致")
     parser.add_argument("--gap_len", type=int, default=200, help="重复帧之间的间隔采样点数，仿真模式建议与tx_program一致")
 
     args = parser.parse_args()

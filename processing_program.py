@@ -296,6 +296,7 @@ class ProcessingProgram:
         # 统计信息
         self.total_processed_frames = 0
         self.ber_history = []
+        self.dropped_frames = 0  # 记录丢弃帧数量
 
         # GUI相关
         self.gui_queue = queue.Queue(maxsize=200)
@@ -363,7 +364,7 @@ class ProcessingProgram:
                             if len(data_bytes) == expected_length:
                                 # 反序列化数据
                                 samples = pickle.loads(data_bytes)
-                                print(f"UDP接收: 数据块大小 {len(samples)}, 来自 {addr}")
+                                #print(f"UDP接收: 数据块大小 {len(samples)}, 来自 {addr}")
 
                                 # 放入处理队列
                                 try:
@@ -400,7 +401,7 @@ class ProcessingProgram:
             try:
                 # 从共享队列获取数据 (reduced timeout for faster polling)
                 samples = self.ipc_queue.get(timeout=0.05)  # Changed from 0.1 to 0.05 for responsiveness
-                print(f"Queue接收成功: 数据块大小 {len(samples)}")
+                #print(f"Queue接收成功: 数据块大小 {len(samples)}")
 
                 # 放入处理队列
                 try:
@@ -557,16 +558,50 @@ class ProcessingProgram:
                     phase_correction = np.exp(-1j * 2 * np.pi * self.sync_state['freq_offset'] * n * Ts)
                     rx_corrected = rx_symbols * phase_correction
 
-                    # 提取数据符号
+                    # 提取数据符号（现在包括帧序号、CRC和数据）
                     data_start = timing_offset + self.qpsk_system.preamble_len
-                    data_end = data_start + self.qpsk_system.data_symbols
+                    frame_index_symbols_end = data_start + 4  # 帧序号4符号（8比特）
+                    crc_symbols_end = frame_index_symbols_end + 8  # CRC 8符号（16比特）
+                    data_end = crc_symbols_end + self.qpsk_system.data_symbols
+                    
                     if data_start < len(rx_corrected) and data_end <= len(rx_corrected):
-                        data_symbols = rx_corrected[data_start:data_end]
+                        # 先提取帧序号符号
+                        frame_index_symbols = rx_corrected[data_start:frame_index_symbols_end]
+                        
+                        # Costas环处理帧序号符号
+                        frame_index_synced = self.costas_loop.process(frame_index_symbols)
+                        frame_index_demod = self.qpsk_system.differential_decode(frame_index_synced)
+                        frame_index_bits = self.qpsk_system._symbols_to_bits(frame_index_demod)
+                        
+                        # 解码并校验帧序号
+                        frame_index, valid = self.qpsk_system.decode_frame_index_hamming_parity(frame_index_bits)
+                        
+                        if not valid:
+                            self.dropped_frames += 1
+                            #print(f"帧序号校验失败，丢弃帧。丢弃总数: {self.dropped_frames}")
+                            continue  # 丢弃该帧，不继续处理
+                        
+                        # 提取CRC符号
+                        crc_symbols = rx_corrected[frame_index_symbols_end:crc_symbols_end]
+                        crc_synced = self.costas_loop.process(crc_symbols)
+                        crc_demod = self.qpsk_system.differential_decode(crc_synced)
+                        crc_bits = self.qpsk_system._symbols_to_bits(crc_demod)
+                        
+                        # 校验通过，继续提取数据符号
+                        data_symbols = rx_corrected[crc_symbols_end:data_end]
 
-                        # Costas环、差分解码、BER等（复用现有逻辑）
+                        # Costas环、差分解码
                         synchronized_symbols = self.costas_loop.process(data_symbols)
                         demod_symbols = self.qpsk_system.differential_decode(synchronized_symbols)
                         recv_bits = self.qpsk_system._symbols_to_bits(demod_symbols)
+                        
+                        # 验证CRC
+                        if not self.qpsk_system.verify_crc16(recv_bits, crc_bits):
+                            self.dropped_frames += 1
+                            #print(f"CRC校验失败，丢弃帧。丢弃总数: {self.dropped_frames}")
+                            continue  # CRC不匹配，丢弃帧
+                        
+                        # CRC校验通过，继续BER计算等
                         expected_bits = self.generate_bits(mode=getattr(self.args, 'bit_generator', 'random'), num_bits=len(recv_bits))
                         if len(expected_bits) == len(recv_bits):
                             errors = np.sum(expected_bits != recv_bits)

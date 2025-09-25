@@ -192,7 +192,7 @@ def main():
 
                         # 提取帧并解调
                         frame_start = timing_offset
-                        frame_end = frame_start + dqpsk.preamble_len + dqpsk.data_symbols
+                        frame_end = frame_start + dqpsk.preamble_len + 4 + 8 + dqpsk.data_symbols  # PSS+SSS+RS + FrameIndex + CRC + Data
                         frame_syms = symbols[frame_start:frame_end]
                         print("frame_syms",len(frame_syms))
                         coarse_freq = dqpsk._enhanced_sss_sync( frame_syms, 0)
@@ -202,9 +202,9 @@ def main():
                         # 频偏校正
                         n = np.arange(len(frame_syms))
                         frame_syms_corr = frame_syms * np.exp(-1j * 2 * np.pi * total_freq * n * dqpsk.Ts)
-                        # 数据提取
-                        data_start =  dqpsk.preamble_len
-                        data_symbols = frame_syms_corr[data_start:]
+                        # 数据提取（跳过帧序号4符号 + CRC 8符号）
+                        data_start = dqpsk.preamble_len
+                        data_symbols = frame_syms_corr[data_start + 4 + 8:]  # 跳过帧序号4符号 + CRC 8符号
                         print("data_symbols",len(data_symbols))        
                         # 相位同步
                         costas = dqpsk._init_costas_loop(loop_bw=0.001)
@@ -212,10 +212,11 @@ def main():
                         # 差分解码
                         demod_symbols = dqpsk.differential_decode(synchronized_symbols)
                         print("demod_symbols",len(demod_symbols))
-                        # BER 计算
+                        # BER 计算（只对数据比特）
                         ref_frame, ref_bits = dqpsk.generate_frame(return_bits=True)
+                        ref_data_bits = ref_bits[24:]  # 跳过帧序号8比特 + CRC 16比特
                         rx_bits = dqpsk._symbols_to_bits(demod_symbols)
-                        ber = dqpsk._calculate_ber(ref_bits, rx_bits)
+                        ber = dqpsk._calculate_ber(ref_data_bits, rx_bits)
 
                         print(f"[Window {w} in Merged {merged_start}-{merged_end}] Detected frame at {detected_start}, Freq offset: {total_freq:.2f} Hz, BER: {ber:.6f}")
 

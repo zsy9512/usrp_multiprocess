@@ -7,6 +7,7 @@ import time
 import threading
 from threading import Event
 import queue
+import crcmod
 
 # Configure matplotlib for English display
 plt.rcParams["font.family"] = ["Arial", "sans-serif"]
@@ -61,8 +62,8 @@ class USRP_DQPSK_System:
             print(f"RS细频估计={fine_freq:.2f} Hz, 总频偏={total_freq:.2f} Hz")
             n2 = np.arange(len(rx_symbols))
             rx_symbols_corr = rx_symbols * np.exp(-1j * 2 * np.pi * (coarse_freq+fine_freq) * n2 * self.Ts)
-            # 5. 数据提取
-            data_start = timing_offset + self.preamble_len
+            # 5. 数据提取（跳过帧序号）
+            data_start = timing_offset + self.preamble_len + 4  # +4符号跳过帧序号
             data_end = data_start + self.data_symbols
             data_symbols = rx_symbols_corr[data_start:data_end]
             print(f"数据符号长度={len(data_symbols)}")
@@ -72,10 +73,12 @@ class USRP_DQPSK_System:
             # 7. 差分解码
             decoded = self.differential_decode(synced)
             rx_bits = self._symbols_to_bits(decoded)
-            print(f"Frame length={len(tx_bits)}, decoded length={len(rx_bits)}")
-            print("rx：",rx_bits[:100],"tx：",tx_bits[:100])
-            min_len = min(len(tx_bits), len(rx_bits))
-            ber = self._calculate_ber(tx_bits[:min_len], rx_bits[:min_len])
+            # BER只计算数据比特（跳过帧序号8比特）
+            tx_data_bits = tx_bits[8:]  # 发送的数据比特
+            print(f"Frame length={len(tx_data_bits)}, decoded length={len(rx_bits)}")
+            print("rx：",rx_bits[:100],"tx：",tx_data_bits[:100])
+            min_len = min(len(tx_data_bits), len(rx_bits))
+            ber = self._calculate_ber(tx_data_bits[:min_len], rx_bits[:min_len])
             print(f"Frame {frame_idx+1}/{n_frames}, BER: {ber:.6f}")
             ber_list.append(ber)
             constellation_points.extend(decoded[:min(200, len(decoded))])
@@ -135,6 +138,7 @@ class USRP_DQPSK_System:
         self.ber_history = []  # 存储每一帧的BER值
         self.frame_numbers = []  # 存储对应的帧号
         self.current_frame = 0  # 当前帧计数器
+        self.frame_counter = 0  # 帧序号计数器，0-7循环
         
         self.recent_symbols = np.array([], dtype=np.complex64)
         self.max_recent_symbols = 200
@@ -156,20 +160,109 @@ class USRP_DQPSK_System:
             print(f"System initialized in {mode} mode")
             print(f"Center Frequency: {center_freq/1e6:.1f} MHz, Sampling Rate: {samp_rate/1e6:.1f} MHz")
 
+    def encode_frame_index_hamming_parity(self, frame_index: int) -> np.ndarray:
+        """编码帧序号：3比特输入 -> 8比特输出 (7位汉明码 + 1位偶校验)"""
+        if not (0 <= frame_index <= 7):
+            raise ValueError("Frame index must be 0-7")
+        
+        # 3比特帧序号，左移一位补0作为4比特输入
+        data_bits = np.array([0, (frame_index >> 2) & 1, (frame_index >> 1) & 1, frame_index & 1], dtype=int)
+        
+        # 汉明(7,4)编码：生成校验位
+        p1 = data_bits[0] ^ data_bits[1] ^ data_bits[3]  # 位置1,3,5,7
+        p2 = data_bits[0] ^ data_bits[2] ^ data_bits[3]  # 位置2,3,6,7
+        p4 = data_bits[1] ^ data_bits[2] ^ data_bits[3]  # 位置5,6,7
+        
+        # 7位汉明码：p1 p2 d1 p4 d2 d3 d4
+        hamming_bits = np.array([p1, p2, data_bits[0], p4, data_bits[1], data_bits[2], data_bits[3]], dtype=int)
+        
+        # 偶校验位（对7位汉明码）
+        parity = np.sum(hamming_bits) % 2
+        
+        # 返回8比特：7位汉明码 + 1位偶校验
+        return np.concatenate([hamming_bits, [parity]])
+
+    def decode_frame_index_hamming_parity(self, bits: np.ndarray) -> tuple[int, bool]:
+        """解码帧序号：8比特输入 -> (帧序号, 校验是否通过)"""
+        if len(bits) != 8:
+            return -1, False
+        
+        hamming_bits = bits[:7]
+        parity = bits[7]
+        
+        # 校验偶校验位
+        computed_parity = np.sum(hamming_bits) % 2
+        if computed_parity != parity:
+            return -1, False  # 校验失败
+        
+        # 汉明(7,4)解码：计算综合校验位
+        s1 = hamming_bits[0] ^ hamming_bits[2] ^ hamming_bits[4] ^ hamming_bits[6]
+        s2 = hamming_bits[1] ^ hamming_bits[2] ^ hamming_bits[5] ^ hamming_bits[6]
+        s4 = hamming_bits[3] ^ hamming_bits[4] ^ hamming_bits[5] ^ hamming_bits[6]
+        syndrome = (s4 << 2) | (s2 << 1) | s1
+        
+        # 纠错（如果有1位错误）
+        if syndrome > 0 and syndrome <= 7:
+            hamming_bits[syndrome - 1] ^= 1  # 纠错
+        
+        # 提取数据位：d1 d2 d3 d4 -> 帧序号
+        d1, d2, d3, d4 = hamming_bits[2], hamming_bits[4], hamming_bits[5], hamming_bits[6]
+        frame_index = (d1 << 2) | (d2 << 1) | d3  # 忽略d4（补0位）
+        
+        # 校验是否在0-7范围内
+        valid = 0 <= frame_index <= 7
+        return frame_index if valid else -1, valid
+
+    def calculate_crc16(self, data_bits: np.ndarray) -> np.ndarray:
+        """计算CRC-16-CCITT，返回16位CRC比特"""
+        # 将numpy数组转换为字节串
+        data_bytes = np.packbits(data_bits).tobytes()
+        # 使用CRC-16-CCITT多项式：x^16 + x^12 + x^5 + 1
+        crc_func = crcmod.mkCrcFun(0x11021, rev=False, initCrc=0xFFFF, xorOut=0x0000)
+        crc_value = crc_func(data_bytes)
+        # 转换为16位二进制数组
+        crc_bits = np.array([int(b) for b in format(crc_value, '016b')])
+        return crc_bits
+
+    def verify_crc16(self, data_bits: np.ndarray, crc_bits: np.ndarray) -> bool:
+        """验证CRC-16-CCITT是否匹配"""
+        # 计算数据的CRC
+        computed_crc = self.calculate_crc16(data_bits)
+        # 比较CRC
+        return np.array_equal(computed_crc, crc_bits)
+
     def generate_frame(self, return_bits=False):
         """生成包含前导和数据的DQPSK帧，返回符号及可选的原始比特"""
         # 生成随机数据比特
         np.random.seed(42)
         data_bits = np.random.randint(0, 2, self.data_bits)
+        
+        # 计算数据比特的CRC-16
+        crc_bits = self.calculate_crc16(data_bits)
+        
         # 转换为符号
         data_symbols = self._bits_to_symbols(data_bits)
+        crc_symbols = self._bits_to_symbols(crc_bits)
         # 差分编码
-        encoded_symbols = self.differential_encode(data_symbols)
-        # 构建完整帧
-        frame = np.concatenate([self.pss, self.sss, self.rs, encoded_symbols])
+        encoded_data_symbols = self.differential_encode(data_symbols)
+        encoded_crc_symbols = self.differential_encode(crc_symbols)
+        
+        # 生成帧序号并编码为比特
+        frame_index_bits = self.encode_frame_index_hamming_parity(self.frame_counter)
+        # 递增帧序号
+        self.frame_counter = (self.frame_counter + 1) % 8
+        # 转换为符号
+        frame_index_symbols = self._bits_to_symbols(frame_index_bits)
+        # 差分编码
+        encoded_frame_index_symbols = self.differential_encode(frame_index_symbols)
+        
+        # 构建完整帧：帧头 + 帧序号 + CRC + 数据
+        frame = np.concatenate([self.pss, self.sss, self.rs, encoded_frame_index_symbols, encoded_crc_symbols, encoded_data_symbols])
         
         if return_bits:
-            return frame, data_bits  # 返回帧和原始比特（用于BER计算）
+            # 返回帧和原始比特（包括帧序号比特，用于BER计算？但BER只计算数据比特）
+            all_bits = np.concatenate([frame_index_bits, crc_bits, data_bits])
+            return frame, all_bits  # 返回帧和所有比特（帧序号+CRC+数据）
         return frame
 
     def _calculate_ber(self, tx_bits, rx_bits):
