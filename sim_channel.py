@@ -22,13 +22,9 @@ sim_channel.py — 独立仿真信道工具
   python sim_channel.py tx_iq.npy rx_iq.npy --snr-db 10 --freq-offset 2000 \
          --phase-offset 0.5 --multipath "1.0,0.3@3,0.1@7"
 
-管道模式 (内存操作, 无文件 IO):
-  python sender.py --mode sim ... && python sim_channel.py tx_iq.npy rx_iq.npy ... && python receiver.py --mode sim --sim-file rx_iq.npy ...
-
 SNR 说明:
-  --snr-db 定义符号级 SNR (Eb/N0):
+  --snr-db 定义信号级 SNR:
     SNR_dB = 10*log10(信号功率 / 噪声功率)
-  默认 15dB 对应约 BER=1e-4 (无频偏).
 """
 
 import argparse
@@ -55,30 +51,28 @@ class SimChannel:
             freq_offset: 频偏 (Hz)
             phase_offset: 初始相偏 (rad)
             multipath: 多径配置, 格式 "gain0,gain1@delay1,gain2@delay2,..."
-                       例如 "1.0,0.3@3,0.1@7"
-                       各径增益和为 1, delay 为单位为样本
         Returns:
             接收基带信号
         """
-        rx = tx_signal.copy()
+        rx = tx_signal.copy().astype(np.complex64)
 
-        # ── 1. 频偏 ──
+        # 频偏
         if abs(freq_offset) > 0:
             t = np.arange(len(rx), dtype=np.float64) / self.samp_rate
             rx = rx * np.exp(1j * 2 * np.pi * freq_offset * t)
 
-        # ── 2. 相偏 ──
+        # 相偏
         if abs(phase_offset) > 0:
             rx = rx * np.exp(1j * phase_offset)
 
-        # ── 3. 多径 ──
+        # 多径
         if multipath:
             taps = self._parse_multipath(multipath)
             if len(taps) > 1:
                 rx = np.convolve(rx, taps, mode='full')[:len(rx)]
 
-        # ── 4. AWGN ──
-        if snr_db < 100:  # 100dB ≈ 无噪声
+        # AWGN
+        if snr_db < 100:
             signal_power = np.mean(np.abs(rx) ** 2)
             noise_power = signal_power / (10 ** (snr_db / 10))
             noise = (np.sqrt(noise_power / 2)
@@ -86,7 +80,7 @@ class SimChannel:
                         + 1j * np.random.randn(len(rx))))
             rx = rx + noise.astype(np.complex64)
 
-        return rx
+        return rx.astype(np.complex64)
 
     @staticmethod
     def _parse_multipath(cfg: str) -> np.ndarray:
@@ -109,13 +103,12 @@ class SimChannel:
         for gain, delay in tap_info:
             h[delay] = gain
 
-        # 归一化 (单位能量)
         h /= np.sqrt(np.sum(np.abs(h) ** 2))
         return h
 
 
 # ======================================================================
-#  CLI
+# CLI
 # ======================================================================
 def main():
     p = argparse.ArgumentParser(
@@ -132,7 +125,6 @@ def main():
     p.add_argument('--rate', type=float, default=1e6, help='采样率 Hz')
     args = p.parse_args()
 
-    # 验证输入
     if not os.path.isfile(args.input):
         print(f"[sim_channel] 错误: 输入文件不存在 → {args.input}")
         sys.exit(1)
@@ -146,16 +138,13 @@ def main():
     if args.multipath:
         print(f"  多径:     {args.multipath}")
 
-    # 加载
     tx = np.load(args.input)
     print(f"  输入:     {len(tx)} 复样本 ({len(tx) / args.rate * 1000:.1f} ms)")
 
-    # 信道处理
     ch = SimChannel(samp_rate=args.rate)
     rx = ch.process(tx, snr_db=args.snr_db, freq_offset=args.freq_offset,
                     phase_offset=args.phase_offset, multipath=args.multipath)
 
-    # 保存
     np.save(args.output, rx)
     print(f"  输出:     {len(rx)} 复样本 → {args.output}")
     print(f"[sim_channel] 完成")

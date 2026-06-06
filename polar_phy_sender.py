@@ -3,7 +3,10 @@
 polar_phy_sender.py — 极化码 + BPSK PHY 融合发送端
 
 链路:
-  Info bits (K=128) → Polar编码 (N=256) → BPSK调制 → 成帧 → USRP/文件
+  Info bits (K=128) → Polar编码 (N=256) → BPSK → 成帧(STF+PSS+RS+Header+Payload+CRC+Guard) → USRP/文件
+
+帧结构 (与 sender.py 一致):
+  STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
 
 用法:
   仿真: python polar_phy_sender.py --mode sim --num-frames 500 --sim-file test.npy
@@ -13,12 +16,11 @@ polar_phy_sender.py — 极化码 + BPSK PHY 融合发送端
 import argparse, os, sys, time
 import numpy as np
 
-# ── 导入 PHY TX 组件 ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sender import (BpskPhySender, PSS, RS, RRC, GUARD_SYMBOLS,
-                    _rrc_filter, _bpsk_mod, _design_rrc)
+from sender import (BpskPhySender, build_frame, default_bit_source, fixed_bit_source)
+from phy_params import PAYLOAD_LEN
 
-# ── 内置极化码编码 (无需 torch) ──
+# ── 内置极化码编码 ──
 def _polar_encode(u):
     N = u.shape[0]
     cw = u.copy().ravel()
@@ -40,7 +42,7 @@ MATRICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy'
 A_PATH = os.path.join(MATRICES_DIR, 'A.npy')
 if not os.path.isfile(A_PATH):
     raise FileNotFoundError(f"冻结比特掩膜未找到: {A_PATH}")
-FROZEN_MASK = np.load(A_PATH).squeeze()  # (N,) 1=信息位, 0=冻结位
+FROZEN_MASK = np.load(A_PATH).squeeze()
 K = int(FROZEN_MASK.sum())  # 128
 N = FROZEN_MASK.shape[0]    # 256
 
@@ -51,7 +53,7 @@ class PolarPhySender:
         self.phy = BpskPhySender(samp_rate=1e6, sps=2)
         self.phy.bit_source = self._polar_bit_source
 
-    def _polar_bit_source(self, n=256):
+    def _polar_bit_source(self, n=PAYLOAD_LEN):
         """上层接口: 随机信息比特 → Polar编码 → 256码字."""
         info_bits = np.random.randint(0, 2, K).astype(np.int64)
         codeword = _build_codeword(info_bits, FROZEN_MASK)
@@ -59,19 +61,16 @@ class PolarPhySender:
 
     def start(self, mode='sim', freq=915e6, gain=70, rate=1e6,
               interval=0, num_frames=100, sim_file='tx_polar.npy',
-              usrp_args='', save_bits=False, repeat=5, fixed_seq=False):
-        # 保存信息比特 (用于BER)
+              usrp_args='', save_bits=False, repeat=1, fixed_seq=False):
         self._info_bits_all = [] if save_bits else None
         self._save_bits = save_bits
 
-        # 包装 start 以保存信息比特
         if fixed_seq:
-            from sender import fixed_bit_source
             self.phy.bit_source = fixed_bit_source
             print("[sender] 使用固定测试序列 (0xAA模式)")
         else:
             original_source = self.phy.bit_source
-            def wrapped_source(n=256):
+            def wrapped_source(n=PAYLOAD_LEN):
                 info = np.random.randint(0, 2, K).astype(np.int64)
                 if self._save_bits:
                     self._info_bits_all.append(info.copy())
@@ -84,7 +83,6 @@ class PolarPhySender:
                        sim_file=sim_file, usrp_args=usrp_args,
                        save_bits=save_bits, repeat=repeat, fixed_seq=fixed_seq)
 
-        # 保存信息比特到文件
         if save_bits and self._info_bits_all:
             bits_file = sim_file.replace('.npy', '_info_bits.npy')
             np.save(bits_file, np.concatenate(self._info_bits_all))
@@ -102,7 +100,7 @@ def main():
     p.add_argument('--num-frames', type=int, default=100)
     p.add_argument('--sim-file', default='tx_polar.npy')
     p.add_argument('--save-bits', action='store_true', help='保存信息比特')
-    p.add_argument('--repeat', type=int, default=5, help='每帧重复次数')
+    p.add_argument('--repeat', type=int, default=1, help='每帧重复次数')
     p.add_argument('--fixed-seq', action='store_true', help='固定测试序列')
     p.add_argument('--usrp-args', default='')
     args = p.parse_args()

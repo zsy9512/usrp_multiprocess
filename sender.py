@@ -1,144 +1,158 @@
 #!/usr/bin/env python3
 """
-sender.py — BPSK PHY 发送端 (完全自包含)
+sender.py — BPSK PHY 发送端 (完整帧结构)
 
-帧结构 (352 符号 = 704 样本 @ sps=2):
-  STF(48) + PSS(32) + RS(16) + Data(256)
+帧结构 (符号域):
+  STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
 
-  STF  = 3×16 重复 BPSK   → 延时相关粗捕获 (免疫频偏)
-  PSS  = Zadoff-Chu u=25  → 精定时同步
-  RS   = 已知 BPSK 导频   → 细频偏估计
-  Data = 载荷 (当前: 随机比特, 预留上层极化码接口)
+  STF   = 4×16 重复 BPSK  → 粗检测 + 粗 CFO
+  PSS   = Zadoff-Chu u=25 → 精定时
+  RS    = 已知 BPSK 导频  → 细 CFO + 相位 + 信道估计
+  Header= 预留 + CRC16    → 帧控制
+  Payload = 数据比特
+  CRC   = Payload CRC16   → 帧正确性
+  Guard = 零符号          → 滤波尾巴
 
-模式:
-  --mode hardware   → USRP B210 实时发送
-  --mode sim        → 输出 IQ 到文件 (供 sim_channel.py + receiver.py 仿真)
+流水线:
+  Info bits → Polar编码 → BPSK → 成帧 → RRC → 发送/保存
 
 用法:
-  # 硬件模式
-  python sender.py --mode hardware --freq 2.45e9
-
-  # 仿真模式 (保存 IQ 到文件)
-  python sender.py --mode sim --sim-file tx_iq.npy --num-frames 2000
-
-上层接口预留:
-  get_info_bits(k) 回调, 当前为 np.random.randint(0, 2, 128)
-  替换为 polar_encode() 即可接入极化码
+  仿真: python sender.py --mode sim --num-frames 200 --sim-file tx_iq.npy
+  硬件: python sender.py --mode hardware --freq 915e6 --gain 30
 """
+from __future__ import annotations
 
-import argparse
-import os
-import sys
-import time
-from typing import Optional, Callable
-
+import argparse, os, sys, time
+from typing import Callable, Optional
 import numpy as np
 
+from phy_params import (
+    SPS, STF, PSS, RS, RRC, STF_LEN, PSS_LEN, RS_LEN,
+    HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN, GUARD_SYMBOLS,
+    FRAME_SYMBOLS, INFO_BITS,
+    crc16, bits_to_bytes, bytes_to_bits,
+)
+
 # ======================================================================
-#  全部 PHY 函数内嵌 (零外部依赖, 完全自包含)
+# Polar 编码 (自包含, 无 torch 依赖)
 # ======================================================================
 
-# ── 帧参数 ──
-STF_REP  = 16
-STF_NUM  = 3
-PSS_LEN  = 32
-RS_LEN   = 16
-DATA_LEN = 256
-FRAME_LEN = STF_REP * STF_NUM + PSS_LEN + RS_LEN + DATA_LEN  # 352
-GUARD_SYMBOLS = 32  # 帧间保护间隔, 消除 RRC 泄漏
-CODEWORD_LEN = 256
-# USRP 突发参数 (参考原始 multiprocess)
-GAP_SAMPLES = 100000  # 帧间100ms零填充, 消除UUU, 不需Python sleep
-BURST_COPIES = 1
-REPEAT_COUNT = 5  # 每帧重复次数 (提高接收成功率)
+def _polar_encode(u: np.ndarray) -> np.ndarray:
+    """Arikan polar transform.  u: (N,) {0,1} → cw: (N,) {0,1}."""
+    N = u.shape[0]
+    cw = u.copy().ravel()
+    n_stages = int(np.log2(N))
+    for stage in range(1, n_stages + 1):
+        sep = N // (1 << stage)
+        for j in range(N):
+            if (j // sep) % 2 == 0:
+                cw[j] = (cw[j] + cw[j + sep]) % 2
+    return cw
 
 
-def _gen_stf() -> np.ndarray:
-    rng = np.random.RandomState(7)
-    base = 2 * rng.randint(0, 2, STF_REP) - 1
-    return np.tile(base, STF_NUM).astype(np.complex64)
+def _build_codeword(info_bits: np.ndarray, frozen_mask: np.ndarray) -> np.ndarray:
+    N = frozen_mask.shape[0]
+    u = np.zeros(N, dtype=np.int64)
+    u[frozen_mask.astype(bool)] = info_bits.ravel()
+    return _polar_encode(u)
 
 
-def _gen_pss() -> np.ndarray:
-    n = np.arange(PSS_LEN)
-    zc = np.exp(-1j * np.pi * 25 * n * (n + 1) / PSS_LEN)
-    return zc.astype(np.complex64)
+# ======================================================================
+# 帧打包
+# ======================================================================
 
-
-def _gen_rs() -> np.ndarray:
-    rng = np.random.RandomState(13)
-    return (2 * rng.randint(0, 2, RS_LEN) - 1).astype(np.complex64)
-
-
-def _design_rrc(sps: int, rolloff: float = 0.35, num_sym: int = 10) -> np.ndarray:
-    """RRC 脉冲成形滤波器. 奇数抽头保证符号定时对齐."""
-    n_taps = num_sym * sps + 1  # 奇数长度, 保证中心对称
-    t = np.linspace(-num_sym / 2, num_sym / 2, n_taps)
-    h = np.zeros_like(t)
-    for i, ti in enumerate(t):
-        if abs(ti) < 1e-12:
-            h[i] = 1 + rolloff * (4 / np.pi - 1)
-        elif abs(abs(ti) - 1 / (4 * rolloff)) < 1e-12:
-            h[i] = (rolloff / np.sqrt(2)) * (
-                (1 + 2 / np.pi) * np.sin(np.pi / (4 * rolloff))
-                + (1 - 2 / np.pi) * np.cos(np.pi / (4 * rolloff)))
-        else:
-            pi_t = np.pi * ti
-            num = np.sin(pi_t * (1 - rolloff)) + 4 * rolloff * ti * np.cos(pi_t * (1 + rolloff))
-            den = pi_t * (1 - (4 * rolloff * ti) ** 2)
-            h[i] = num / den
-    return (h / np.sqrt(np.sum(h ** 2))).astype(np.float32)
-
-
-def _bpsk_mod(bits: np.ndarray) -> np.ndarray:
+def _bpsk(bits: np.ndarray) -> np.ndarray:
+    """{0,1} → {+1,-1} BPSK."""
     return (1.0 - 2.0 * bits).astype(np.float32)
 
 
-def _rrc_filter(symbols: np.ndarray, rrc: np.ndarray, sps: int) -> np.ndarray:
-    """RRC 脉冲成形: 上采样 → 滤波 (mode='full', 保留全部样本)."""
+def build_frame(data_bits: np.ndarray) -> np.ndarray:
+    """构建一帧的基带符号 (符号域).
+
+    Args:
+        data_bits: (PAYLOAD_LEN,) {0,1} 数据比特
+    Returns:
+        (FRAME_SYMBOLS,) complex64
+    """
+    assert len(data_bits) == PAYLOAD_LEN, f"data_bits len={len(data_bits)} != {PAYLOAD_LEN}"
+
+    # --- Payload CRC ---
+    payload_bytes = bits_to_bytes(data_bits)
+    payload_crc = crc16(payload_bytes)
+    crc_bits = bytes_to_bits(
+        np.array([(payload_crc >> 8) & 0xFF, payload_crc & 0xFF], dtype=np.uint8), 16)
+
+    # --- Header (预留 + CRC16) ---
+    # Header 前 16 bit 为预留字段, 后 16 bit 为 Header CRC
+    header_reserved = np.zeros(16, dtype=np.int64)
+    header_bytes = bits_to_bytes(header_reserved)
+    header_crc = crc16(header_bytes)
+    header_crc_bits = bytes_to_bits(
+        np.array([(header_crc >> 8) & 0xFF, header_crc & 0xFF], dtype=np.uint8), 16)
+    header_bits = np.concatenate([header_reserved, header_crc_bits])
+
+    # --- 符号域帧 ---
+    stf_syms  = STF.astype(np.complex64)
+    pss_syms  = PSS.astype(np.complex64)
+    rs_syms   = RS.astype(np.complex64)
+    hdr_syms  = _bpsk(header_bits).astype(np.complex64)
+    data_syms = _bpsk(data_bits).astype(np.complex64)
+    crc_syms  = _bpsk(crc_bits).astype(np.complex64)
+    guard     = np.zeros(GUARD_SYMBOLS, dtype=np.complex64)
+
+    frame = np.concatenate([stf_syms, pss_syms, rs_syms,
+                            hdr_syms, data_syms, crc_syms, guard])
+    return frame
+
+
+def rrc_filter(symbols: np.ndarray, rrc: np.ndarray, sps: int) -> np.ndarray:
+    """RRC 脉冲成形: 上采样 → 滤波."""
     up = np.zeros(len(symbols) * sps, dtype=np.complex64)
     up[::sps] = symbols
     return np.convolve(up, rrc, mode='full').astype(np.complex64)
 
 
 # ======================================================================
-#  帧序列 (程序生命周期内只生成一次)
+# 默认比特源
 # ======================================================================
-STF_SYMS = _gen_stf()       # (48,) 符号级 BPSK
-PSS      = _gen_pss()       # (32,)
-RS       = _gen_rs()        # (16,)
-RRC      = _design_rrc(2)   # (20*2+1,)
+
+FROZEN_MASK_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'deploy', 'matrices', 'A.npy')
+
+_FROZEN = None
+if os.path.isfile(FROZEN_MASK_PATH):
+    _FROZEN = np.load(FROZEN_MASK_PATH).squeeze()
+    _K = int(_FROZEN.sum())
+else:
+    _K = INFO_BITS
 
 
-# ======================================================================
-#  占位: 上层信息比特接口
-# ======================================================================
-def default_bit_source(n: int = CODEWORD_LEN) -> np.ndarray:
-    """默认: 随机码字 (256 bits, 模拟极化码输出).
+def default_bit_source(n: int = PAYLOAD_LEN) -> np.ndarray:
+    """默认: 随机信息比特 → Polar 编码 → 码字.
 
-    替换为 polar_encode(info_bits, frozen_mask) 即可接入极化码.
+    若无 frozen mask, 直接返回随机比特.
     """
-    return np.random.randint(0, 2, n).astype(np.int64)
+    if _FROZEN is not None:
+        info = np.random.randint(0, 2, _K).astype(np.int64)
+        return _build_codeword(info, _FROZEN)
+    else:
+        return np.random.randint(0, 2, n).astype(np.int64)
 
-def fixed_bit_source(n: int = CODEWORD_LEN) -> np.ndarray:
+
+def fixed_bit_source(n: int = PAYLOAD_LEN) -> np.ndarray:
     """固定已知序列: 交替 0xAA, 0x55 模式, 用于物理层调试."""
     pattern = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int64)
     return np.tile(pattern, n // 8 + 1)[:n]
 
 
 # ======================================================================
-#  Sender 核心类
+# Sender 类
 # ======================================================================
+
 class BpskPhySender:
-    """BPSK PHY 发送端.
+    """BPSK PHY 发送端 (完整帧结构)."""
 
-    用法:
-        sender = BpskPhySender(samp_rate=1e6, sps=2)
-        sender.start(mode='hardware', freq=2.45e9, gain=50,
-                     frame_interval=0.002)
-    """
-
-    def __init__(self, samp_rate: float = 1e6, sps: int = 2,
+    def __init__(self, samp_rate: float = 1e6, sps: int = SPS,
                  bit_source: Optional[Callable] = None):
         self.samp_rate = samp_rate
         self.sps = sps
@@ -147,91 +161,90 @@ class BpskPhySender:
         self.usrp = None
         self.tx_stream = None
 
-    # ── 公共接口 ──
-
-    def start(self, mode: str = 'sim', freq: float = 2.45e9, gain: float = 60,
-              frame_interval: float = 0.001, num_frames: int = 0,
+    def start(self, mode: str = 'sim', freq: float = 915e6, gain: float = 60,
+              frame_interval: float = 0.002, num_frames: int = 0,
               sim_file: str = 'tx_iq.npy', usrp_args: str = '',
-              save_bits: bool = False, repeat: int = 1, fixed_seq: bool = False):
+              save_bits: bool = False, repeat: int = 1, fixed_seq: bool = False,
+              tx_delay_s: float = 1.0):
         """启动发送.
 
         Args:
             mode: 'hardware' | 'sim'
-            freq: 中心频率 (Hz), 仅 hardware 模式
-            gain: 发射增益 (dB), 仅 hardware 模式
-            frame_interval: 帧间间隔 (秒), 0=最快
-            num_frames: 发送帧数, 0=无限
-            sim_file: 仿真模式输出文件 (.npy)
-            usrp_args: UHD 设备参数, 如 "name=MyB210"
+            freq: 中心频率 (Hz)
+            gain: TX 增益 (dB)
+            frame_interval: 帧间隔 (s), 0=最快
+            num_frames: 帧数, 0=无限
+            sim_file: 仿真输出 .npy
+            save_bits: 保存发送比特
+            repeat: 每帧重复次数
+            fixed_seq: 使用固定测试序列
+            tx_delay_s: 硬件模式发射前延迟 (等待 RX 就绪)
         """
         self.running = True
         frame_count = 0
-
-        if mode == 'hardware':
-            self._init_usrp(freq, gain, usrp_args)
-
-        # 仿真模式: 预分配全部帧
-        tx_buf = [] if mode == 'sim' else None
-        all_bits = [] if save_bits else None
-
-        print(f"[sender] mode={mode}  rate={self.samp_rate/1e6:.1f}Msps  "
-              f"sps={self.sps}  interval={frame_interval*1000:.2f}ms")
-        payload_syms = PSS_LEN + RS_LEN + DATA_LEN + GUARD_SYMBOLS
-        payload_samples = payload_syms * self.sps + len(RRC) - 1
-        print(f"[sender] frame={payload_syms}sym ({payload_samples}samples)  "
-              f"air_time={payload_samples/self.samp_rate*1000:.3f}ms")
+        iq_list = [] if mode == 'sim' else None
+        bits_list = [] if save_bits else None
 
         if fixed_seq:
             self.bit_source = fixed_bit_source
             print("[sender] 使用固定测试序列 (0xAA模式)")
 
-        t_start = time.time()
-        gap_zeros = np.zeros(GAP_SAMPLES, dtype=np.complex64)
+        # --- 预计算 ---
+        rrc = RRC
+        frame_samples = FRAME_SYMBOLS * self.sps + len(rrc) - 1
+        air_time_ms = frame_samples / self.samp_rate * 1000
 
-        # 硬件模式: 创建一次 TXMetadata, 持续流式发送
+        print(f"[sender] mode={mode}  rate={self.samp_rate/1e6:.1f}Msps  "
+              f"sps={self.sps}  interval={frame_interval*1000:.2f}ms")
+        print(f"[sender] frame={FRAME_SYMBOLS}sym → {frame_samples}samples  "
+              f"air_time={air_time_ms:.3f}ms")
+
+        # --- 硬件初始化 ---
         if mode == 'hardware':
             import uhd
+            self._init_usrp(freq, gain, usrp_args)
+            print(f"[sender] 等待 {tx_delay_s}s 后发射...")
+            time.sleep(tx_delay_s)
             tx_md = uhd.types.TXMetadata()
             tx_md.start_of_burst = True
             tx_md.end_of_burst = False
 
+        t_start = time.time()
         try:
             while self.running:
-                # ── 1. 获取码字比特 (256 bits, 上层极化码接口) ──
-                codeword = self.bit_source(CODEWORD_LEN)
+                # --- 1. 生成数据比特 ---
+                data_bits = self.bit_source(PAYLOAD_LEN)
 
-                # ── 2. BPSK 调制 → 256 符号 ──
-                data_syms = _bpsk_mod(codeword)
-                if len(data_syms) < DATA_LEN:
-                    pad = np.zeros(DATA_LEN - len(data_syms), dtype=np.float32)
-                    data_syms = np.concatenate([data_syms, pad])
-                elif len(data_syms) > DATA_LEN:
-                    data_syms = data_syms[:DATA_LEN]
+                # --- 2. 构建帧 (符号域) ---
+                frame_syms = build_frame(data_bits)
 
-                # ── 3. 帧: PSS+RS+Data+Guard 经 RRC 脉冲成形 ──
-                frame_syms = np.concatenate([PSS, RS, data_syms,
-                                              np.zeros(GUARD_SYMBOLS, dtype=np.complex64)])
-                tx_signal = _rrc_filter(frame_syms, RRC, self.sps).astype(np.complex64)
+                # --- 3. RRC 脉冲成形 ---
+                tx_signal = rrc_filter(frame_syms, rrc, self.sps)
 
-                # ── 4. 重复发送当前帧 repeat 次 ──
+                # --- 4. 重复发送 (repeat 次) ---
                 for ri in range(repeat):
                     if mode == 'hardware':
-                        self.tx_stream.send(tx_signal, tx_md)
+                        self.tx_stream.send(tx_signal.astype(np.complex64), tx_md)
                         tx_md.start_of_burst = False
-                        self.tx_stream.send(gap_zeros, tx_md)
+                        # 帧间间隔
+                        gap_len = max(16, int(frame_interval * self.samp_rate))
+                        gap = np.zeros(gap_len, dtype=np.complex64)
+                        tx_gap_md = uhd.types.TXMetadata()
+                        tx_gap_md.start_of_burst = False
+                        tx_gap_md.end_of_burst = False
+                        self.tx_stream.send(gap, tx_gap_md)
                     else:
-                        tx_buf.append(tx_signal)
-                    if save_bits:
-                        all_bits.append(codeword)
+                        iq_list.append(tx_signal)
+                        if save_bits:
+                            bits_list.append(data_bits)
 
                 frame_count += 1
                 if num_frames > 0 and frame_count >= num_frames:
                     break
-                # 硬件模式: gap 控制帧率, 无需 sleep
                 if mode != 'hardware' and frame_interval > 0:
                     time.sleep(frame_interval)
 
-            # ── 关闭发射链 ──
+            # --- 关闭发射链 ---
             if mode == 'hardware':
                 tx_md.end_of_burst = True
                 self.tx_stream.send(np.zeros(1, dtype=np.complex64), tx_md)
@@ -247,65 +260,37 @@ class BpskPhySender:
             if mode == 'hardware':
                 self._close_usrp()
             else:
-                # 保存 IQ 文件
-                tx_iq = np.concatenate(tx_buf)
+                tx_iq = np.concatenate(iq_list) if iq_list else np.array([], dtype=np.complex64)
                 np.save(sim_file, tx_iq)
                 print(f"[sender] 已保存 {len(tx_iq)} 样本 → {sim_file}")
-                # 保存发送比特 (用于 BER 计算)
-                if save_bits and all_bits:
+                if save_bits and bits_list:
                     bits_file = sim_file.replace('.npy', '_bits.npy')
-                    np.save(bits_file, np.concatenate(all_bits))
-                    print(f"[sender] 已保存 {len(np.concatenate(all_bits))} 比特 → {bits_file}")
+                    np.save(bits_file, np.concatenate(bits_list))
+                    print(f"[sender] 已保存发送比特 → {bits_file}")
 
     def stop(self):
         self.running = False
 
-    # ── UHD 硬件接口 ──
-
-    def _init_usrp(self, freq: float, gain: float, usrp_args: str):
+    def _init_usrp(self, freq: float, gain: float, usrp_args: str = ''):
         import uhd
         self.usrp = uhd.usrp.MultiUSRP(usrp_args)
-        self.usrp.set_tx_freq(uhd.types.TuneRequest(freq))
-        self.usrp.set_tx_gain(gain)
-        self.usrp.set_tx_rate(self.samp_rate)
-        # 时钟初始化 (PC 纳秒时间)
+        actual_freq = self.usrp.set_tx_freq(uhd.types.TuneRequest(freq))
+        actual_gain = self.usrp.set_tx_gain(gain)
+        actual_rate = self.usrp.set_tx_rate(self.samp_rate)
+        actual_bw   = self.usrp.set_tx_bandwidth(self.samp_rate)
+        self.usrp.set_tx_antenna("TX/RX")
+        self.usrp.set_clock_source("internal")
+        self.usrp.set_time_source("internal")
         pc_ns = time.time_ns()
         tspec = uhd.types.TimeSpec(pc_ns // 1_000_000_000,
                                    (pc_ns % 1_000_000_000) / 1e9)
         self.usrp.set_time_now(tspec)
-        self.usrp.set_clock_source('internal')
-        self.usrp.set_time_source('internal')
-        # 创建发送流
         args = uhd.usrp.StreamArgs('fc32', 'sc16')
         args.channels = [0]
         self.tx_stream = self.usrp.get_tx_stream(args)
-        print(f"[sender] USRP TX: {freq/1e6:.1f}MHz, gain={gain}dB")
-
-    def _send_usrp_burst(self, burst_signals, is_first, is_last):
-        """发送 USRP 突发.
-
-        Args:
-            burst_signals: list of ndarray, 每个元素是一帧+RRC的完整信号
-            is_first: 是否是整个传输的第一个 burst (设置 start_of_burst)
-            is_last:  是否是整个传输的最后一个 burst (设置 end_of_burst)
-        """
-        import uhd
-        md = uhd.types.TXMetadata()
-        md.start_of_burst = is_first
-        md.end_of_burst = False
-
-        gap = np.zeros(GAP_SAMPLES, dtype=np.complex64)
-
-        for i, sig in enumerate(burst_signals):
-            # 发送帧
-            md.end_of_burst = False
-            self.tx_stream.send(sig.astype(np.complex64), md, timeout=0.1)
-            md.start_of_burst = False
-
-            # 发送间隙 (维持 USRP 发射链, 避免瞬态)
-            is_last_sig = (i == len(burst_signals) - 1) and is_last
-            md.end_of_burst = is_last_sig
-            self.tx_stream.send(gap, md, timeout=0.1)
+        print(f"[sender] USRP TX: freq={actual_freq:.6e}Hz  "
+              f"gain={actual_gain:.1f}dB  rate={actual_rate:.6e}  "
+              f"bw={actual_bw:.6e}")
 
     def _close_usrp(self):
         import uhd
@@ -316,27 +301,27 @@ class BpskPhySender:
                 self.tx_stream.send(np.zeros(1, dtype=np.complex64), md)
             except Exception:
                 pass
-        if self.usrp is not None:
-            self.usrp = None
-            self.tx_stream = None
+        self.usrp = None
+        self.tx_stream = None
         print("[sender] USRP 已关闭")
 
 
 # ======================================================================
-#  CLI
+# CLI
 # ======================================================================
+
 def main():
-    p = argparse.ArgumentParser(description='BPSK PHY 发送端 (自包含)')
+    p = argparse.ArgumentParser(description='BPSK PHY 发送端')
     p.add_argument('--mode', default='sim', choices=['hardware', 'sim'])
     p.add_argument('--freq', type=float, default=915e6, help='中心频率 Hz')
     p.add_argument('--gain', type=float, default=60, help='发射增益 dB')
     p.add_argument('--rate', type=float, default=1e6, help='采样率 Hz')
-    p.add_argument('--sps', type=int, default=2, help='每符号采样数')
+    p.add_argument('--sps', type=int, default=SPS, help='每符号采样数')
     p.add_argument('--interval', type=float, default=0.002, help='帧间隔 s')
     p.add_argument('--num-frames', type=int, default=0, help='帧数 (0=无限)')
     p.add_argument('--sim-file', default='tx_iq.npy', help='仿真输出文件')
-    p.add_argument('--save-bits', action='store_true', help='保存发送比特用于 BER')
-    p.add_argument('--repeat', type=int, default=5, help='每帧重复次数')
+    p.add_argument('--save-bits', action='store_true', help='保存发送比特')
+    p.add_argument('--repeat', type=int, default=1, help='每帧重复次数')
     p.add_argument('--fixed-seq', action='store_true', help='使用固定测试序列(0xAA)')
     p.add_argument('--usrp-args', default='', help='UHD 参数')
     args = p.parse_args()
