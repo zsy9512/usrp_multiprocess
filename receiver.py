@@ -116,7 +116,7 @@ class BpskPhyReceiver:
         # ── ① RS 滑动相关 (找帧) ──
         rs_corr = np.correlate(symbols, REF_RS, mode='valid')  # 复数, 保留相位
         rs_mag = np.abs(rs_corr)
-        thr = max(2.0, np.mean(rs_mag) * 5)
+        thr = np.percentile(rs_mag, 10) * 6  # 10分位噪声参考 ×6
         peaks = [i for i in range(1, len(rs_mag)-1)
                  if rs_mag[i] > thr and rs_mag[i] > rs_mag[i-1] and rs_mag[i] > rs_mag[i+1]]
         if not peaks:
@@ -147,10 +147,12 @@ class BpskPhyReceiver:
                 (np.sum(nn32**2) - PSS_LEN * np.mean(nn32)**2)
         freq_est = slope / (2 * np.pi * self.Ts)
 
-        # ── ③ RS 解决 π 相位模糊 ──
+        # ── ③ RS 解决 π 相位模糊 + 质量门限 ──
         rs_seg = symbols[p + PSS_LEN:p + PSS_LEN + RS_LEN]
         rs_dot = np.dot(rs_seg, np.conj(REF_RS))  # 保留符号, 不用 abs
         rs_val = np.abs(rs_dot)
+        if rs_val < 1.0:  # 低于1.0是噪声误检
+            return
         if rs_dot.real < 0:
             # BPSK 相位翻转 180°, 翻转极性
             flip_phase = np.pi

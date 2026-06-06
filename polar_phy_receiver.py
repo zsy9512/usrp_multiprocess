@@ -81,7 +81,7 @@ class PolarPhyReceiver(BpskPhyReceiver):
 
         # ── ① RS 同步 ──
         rs_corr = np.abs(np.correlate(symbols, REF_RS, mode='valid'))
-        thr = 2.0  # 固定阈值: 只有RS>2.0才认为是信号
+        thr = np.percentile(rs_corr, 10) * 6  # 10分位噪声参考 ×6
         peaks = [i for i in range(1, len(rs_corr)-1)
                  if rs_corr[i] > thr and rs_corr[i] > rs_corr[i-1] and rs_corr[i] > rs_corr[i+1]]
         if not peaks:
@@ -106,6 +106,8 @@ class PolarPhyReceiver(BpskPhyReceiver):
         # ── ② RS 频偏估计 ──
         rs_seg = symbols[p + PSS_LEN:p + PSS_LEN + RS_LEN]
         rs_corr_val = np.abs(np.dot(rs_seg, np.conj(REF_RS)))
+        if rs_corr_val < 1.0:  # 噪声误检过滤
+            return
         rs_tone = rs_seg * np.conj(REF_RS)
         rs_phase = np.unwrap(np.angle(rs_tone))
         nn16 = np.arange(RS_LEN, dtype=np.float64)
