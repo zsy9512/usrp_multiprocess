@@ -49,7 +49,8 @@ GUARD_SYMBOLS = 32  # 帧间保护间隔, 消除 RRC 泄漏
 CODEWORD_LEN = 256
 # USRP 突发参数 (参考原始 multiprocess)
 GAP_SAMPLES = 100000  # 帧间100ms零填充, 消除UUU, 不需Python sleep
-BURST_COPIES = 1      # 改为1, 避免USB欠载
+BURST_COPIES = 1
+REPEAT_COUNT = 5  # 每帧重复次数 (提高接收成功率)
 
 
 def _gen_stf() -> np.ndarray:
@@ -118,6 +119,11 @@ def default_bit_source(n: int = CODEWORD_LEN) -> np.ndarray:
     """
     return np.random.randint(0, 2, n).astype(np.int64)
 
+def fixed_bit_source(n: int = CODEWORD_LEN) -> np.ndarray:
+    """固定已知序列: 交替 0xAA, 0x55 模式, 用于物理层调试."""
+    pattern = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.int64)
+    return np.tile(pattern, n // 8 + 1)[:n]
+
 
 # ======================================================================
 #  Sender 核心类
@@ -145,7 +151,7 @@ class BpskPhySender:
     def start(self, mode: str = 'sim', freq: float = 2.45e9, gain: float = 60,
               frame_interval: float = 0.001, num_frames: int = 0,
               sim_file: str = 'tx_iq.npy', usrp_args: str = '',
-              save_bits: bool = False):
+              save_bits: bool = False, repeat: int = 1, fixed_seq: bool = False):
         """启动发送.
 
         Args:
@@ -173,6 +179,10 @@ class BpskPhySender:
         payload_samples = payload_syms * self.sps + len(RRC) - 1
         print(f"[sender] frame={payload_syms}sym ({payload_samples}samples)  "
               f"air_time={payload_samples/self.samp_rate*1000:.3f}ms")
+
+        if fixed_seq:
+            self.bit_source = fixed_bit_source
+            print("[sender] 使用固定测试序列 (0xAA模式)")
 
         t_start = time.time()
         gap_zeros = np.zeros(GAP_SAMPLES, dtype=np.complex64)
@@ -202,13 +212,14 @@ class BpskPhySender:
                                               np.zeros(GUARD_SYMBOLS, dtype=np.complex64)])
                 tx_signal = _rrc_filter(frame_syms, RRC, self.sps).astype(np.complex64)
 
-                # ── 4. 发送 (持续流: 帧+100ms零间隙, USRP永远不空) ──
-                if mode == 'hardware':
-                    self.tx_stream.send(tx_signal, tx_md)
-                    tx_md.start_of_burst = False
-                    self.tx_stream.send(gap_zeros, tx_md)
-                else:
-                    tx_buf.append(tx_signal)
+                # ── 4. 重复发送当前帧 repeat 次 ──
+                for ri in range(repeat):
+                    if mode == 'hardware':
+                        self.tx_stream.send(tx_signal, tx_md)
+                        tx_md.start_of_burst = False
+                        self.tx_stream.send(gap_zeros, tx_md)
+                    else:
+                        tx_buf.append(tx_signal)
                     if save_bits:
                         all_bits.append(codeword)
 
@@ -324,6 +335,8 @@ def main():
     p.add_argument('--num-frames', type=int, default=0, help='帧数 (0=无限)')
     p.add_argument('--sim-file', default='tx_iq.npy', help='仿真输出文件')
     p.add_argument('--save-bits', action='store_true', help='保存发送比特用于 BER')
+    p.add_argument('--repeat', type=int, default=5, help='每帧重复次数')
+    p.add_argument('--fixed-seq', action='store_true', help='使用固定测试序列(0xAA)')
     p.add_argument('--usrp-args', default='', help='UHD 参数')
     args = p.parse_args()
 
@@ -336,6 +349,8 @@ def main():
         num_frames=args.num_frames,
         sim_file=args.sim_file,
         save_bits=args.save_bits,
+        repeat=args.repeat,
+        fixed_seq=args.fixed_seq,
         usrp_args=args.usrp_args,
     )
 

@@ -115,7 +115,7 @@ class BpskPhyReceiver:
 
         # ── ① RS 全窗口滑动相关 (用 np.correlate 加速) ──
         rs_corr = np.abs(np.correlate(symbols, REF_RS, mode='valid'))
-        thr = np.mean(rs_corr) * 6  # 提高阈值减少误检
+        thr = 2.0  # 固定阈值
         peaks = [i for i in range(1, len(rs_corr)-1)
                  if rs_corr[i] > thr and rs_corr[i] > rs_corr[i-1] and rs_corr[i] > rs_corr[i+1]]
         if not peaks:
@@ -176,7 +176,10 @@ class BpskPhyReceiver:
 
     # ── 仿真模式 ──
     def _rx_loop_sim(self, sim_file, tx_bits):
-        mm = np.load(sim_file, mmap_mode='r')
+        if sim_file.endswith('.bin'):
+            mm = np.fromfile(sim_file, dtype=np.complex64)
+        else:
+            mm = np.load(sim_file, mmap_mode='r')
         total = len(mm)
         pos = 0
         while pos < total and self.running:
@@ -255,12 +258,9 @@ class BpskPhyReceiver:
     def _flush_iq(self):
         if self._iq_buffer:
             data = np.concatenate(self._iq_buffer)
-            # 追加到文件
-            try:
-                existing = np.load(self.save_iq_path) if os.path.isfile(self.save_iq_path) else np.array([], dtype=np.complex64)
-                np.save(self.save_iq_path, np.concatenate([existing, data]))
-            except:
-                np.save(self.save_iq_path, data)
+            # 二进制追加写入 (避免 np.save 的覆盖问题)
+            with open(self.save_iq_path, 'ab') as f:
+                data.tofile(f)
             print(f"[save_iq] 已保存 {len(data)} 样本 → {self.save_iq_path}")
             self._iq_buffer = []
 

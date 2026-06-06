@@ -59,25 +59,30 @@ class PolarPhySender:
 
     def start(self, mode='sim', freq=915e6, gain=70, rate=1e6,
               interval=0, num_frames=100, sim_file='tx_polar.npy',
-              usrp_args='', save_bits=False):
+              usrp_args='', save_bits=False, repeat=5, fixed_seq=False):
         # 保存信息比特 (用于BER)
         self._info_bits_all = [] if save_bits else None
         self._save_bits = save_bits
 
         # 包装 start 以保存信息比特
-        original_source = self.phy.bit_source
-        def wrapped_source(n=256):
-            info = np.random.randint(0, 2, K).astype(np.int64)
-            if self._save_bits:
-                self._info_bits_all.append(info.copy())
-            cw = _build_codeword(info, FROZEN_MASK)
-            return cw
-        self.phy.bit_source = wrapped_source
+        if fixed_seq:
+            from sender import fixed_bit_source
+            self.phy.bit_source = fixed_bit_source
+            print("[sender] 使用固定测试序列 (0xAA模式)")
+        else:
+            original_source = self.phy.bit_source
+            def wrapped_source(n=256):
+                info = np.random.randint(0, 2, K).astype(np.int64)
+                if self._save_bits:
+                    self._info_bits_all.append(info.copy())
+                cw = _build_codeword(info, FROZEN_MASK)
+                return cw
+            self.phy.bit_source = wrapped_source
 
         self.phy.start(mode=mode, freq=freq, gain=gain,
                        frame_interval=interval, num_frames=num_frames,
                        sim_file=sim_file, usrp_args=usrp_args,
-                       save_bits=save_bits)
+                       save_bits=save_bits, repeat=repeat, fixed_seq=fixed_seq)
 
         # 保存信息比特到文件
         if save_bits and self._info_bits_all:
@@ -97,6 +102,8 @@ def main():
     p.add_argument('--num-frames', type=int, default=100)
     p.add_argument('--sim-file', default='tx_polar.npy')
     p.add_argument('--save-bits', action='store_true', help='保存信息比特')
+    p.add_argument('--repeat', type=int, default=5, help='每帧重复次数')
+    p.add_argument('--fixed-seq', action='store_true', help='固定测试序列')
     p.add_argument('--usrp-args', default='')
     args = p.parse_args()
 
@@ -104,7 +111,8 @@ def main():
     sender.start(mode=args.mode, freq=args.freq, gain=args.gain,
                  rate=args.rate, interval=args.interval,
                  num_frames=args.num_frames, sim_file=args.sim_file,
-                 usrp_args=args.usrp_args, save_bits=args.save_bits)
+                 usrp_args=args.usrp_args, save_bits=args.save_bits,
+                 repeat=args.repeat, fixed_seq=args.fixed_seq)
 
 if __name__ == '__main__':
     main()

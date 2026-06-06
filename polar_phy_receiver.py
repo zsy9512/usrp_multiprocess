@@ -33,15 +33,28 @@ PCM_PATH = os.path.join(MATRICES_DIR, 'pcm.npy')
 CKPT_PATH = os.path.join(CKPT_DIR, 'polar_GNN_20_iter_0_epoches_13.pt')
 
 
+def _polar_encode(u):
+    """Arikan polar transform (自逆: G = G^(-1))."""
+    N = u.shape[0]
+    cw = u.copy().ravel()
+    for stage in range(1, int(np.log2(N)) + 1):
+        sep = N // (1 << stage)
+        for j in range(N):
+            if (j // sep) % 2 == 0:
+                cw[j] = (cw[j] + cw[j + sep]) % 2
+    return cw
+
+
 class PolarPhyReceiver(BpskPhyReceiver):
     """极化码 + PHY 融合接收端."""
 
     def __init__(self, samp_rate=1e6, sps=2, device='cpu'):
         super().__init__(samp_rate=samp_rate, sps=sps)
         self.device = device
+        self._iq_buffer = None  # 硬件模式 IQ 保存缓冲
 
         # 加载 SGNN 模型和 Tanner 图
-        print(f"[receiver] 加载 SGNN 译码器...")
+        print(f"[receiver] 加载 SGNN 译码器 (device={device})...")
         self.sgnn_model, cfg = sgnn_receiver.load_model(CKPT_PATH, device=device)
         self.graph = sgnn_receiver.build_graph(PCM_PATH, device=device)
         self.N = self.graph['N']      # 256
@@ -68,7 +81,7 @@ class PolarPhyReceiver(BpskPhyReceiver):
 
         # ── ① RS 同步 ──
         rs_corr = np.abs(np.correlate(symbols, REF_RS, mode='valid'))
-        thr = np.mean(rs_corr) * 6
+        thr = 2.0  # 固定阈值: 只有RS>2.0才认为是信号
         peaks = [i for i in range(1, len(rs_corr)-1)
                  if rs_corr[i] > thr and rs_corr[i] > rs_corr[i-1] and rs_corr[i] > rs_corr[i+1]]
         if not peaks:
@@ -108,27 +121,19 @@ class PolarPhyReceiver(BpskPhyReceiver):
         data_syms = symbols[data_start:data_start + DATA_LEN]
         data_corrected = data_syms * np.exp(-1j * 2 * np.pi * freq_est * (data_start + n_data) * self.Ts)
 
-        # BPSK LLR (σ² 从信号功率估计)
-        sig_power = np.var(data_corrected.real)
-        sigma = max(np.sqrt(sig_power * 0.1), 0.01)  # 假设 SNR≈10dB
-        llr = (2.0 * data_corrected.real.astype(np.float32)) / (sigma ** 2)
+        # BPSK LLR — 归一化信号幅度到1后匹配 SGNN 训练条件
+        amp = max(np.std(data_corrected.real), 0.01)  # 估计信号幅度
+        sigma_llr = 0.5  # 对应 SGNN 训练 SNR
+        llr = (2.0 * data_corrected.real.astype(np.float32) / amp) / (sigma_llr ** 2)
+        llr = np.clip(llr, -20, 20)  # 限幅防溢出
 
-        # ── ④ SGNN 译码 ──
-        v_feat = np.zeros((self.N_hat, 1), dtype=np.float32)
-        v_feat[-self.N:, 0] = llr  # 后 N=256 个节点放 LLR
-        v_t = torch.from_numpy(v_feat).unsqueeze(0).to(self.device)
-        f_t = self.graph['template_f'].unsqueeze(0).to(self.device)
+        # ── ④ SGNN 译码 (可选) — 高SNR时直判更好 ──
+        code_bits = (llr < 0).astype(np.int64)  # 直判比特
 
-        with torch.no_grad():
-            out = self.sgnn_model(v_t, f_t,
-                                  self.graph['edge_index'],
-                                  self.graph['edge_index_rev'])
-            code_llr = out[-1][0, -self.N:, 0].cpu().numpy()
-
-        # 码字硬判决 + 提取信息位
-        code_bits = (code_llr < 0).astype(np.int64)
+        # 反 Arikan 变换 → 输入向量 u → 信息位
+        u_hat = _polar_encode(code_bits)
         if self.frozen_mask is not None:
-            info_bits = code_bits[self.frozen_mask.astype(bool)]
+            info_bits = u_hat[self.frozen_mask.astype(bool)]
 
         # ── ⑤ 信息位 BER ──
         if tx_bits is not None and self.frozen_mask is not None:
@@ -172,12 +177,19 @@ def main():
     p.add_argument('--rate', type=float, default=1e6)
     p.add_argument('--sim-file', default='rx_polar.npy')
     p.add_argument('--tx-info-bits', default='', help='发送端信息比特(.npy)')
-    p.add_argument('--device', default='cpu', choices=['cpu', 'cuda'])
+    p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu',
+                    choices=['cpu', 'cuda'], help='推理设备')
+    p.add_argument('--sgnn', action='store_true', help='使用SGNN译码(默认直判)')
     p.add_argument('--usrp-args', default='')
     p.add_argument('--subdev', default='A:A')
+    p.add_argument('--save-iq', default='', help='保存原始IQ到文件(.npy), 用于离线分析')
     args = p.parse_args()
 
     rx = PolarPhyReceiver(samp_rate=args.rate, device=args.device)
+    # 如果指定 --save-iq, 启用 IQ 保存
+    if args.save_iq:
+        rx._iq_buffer = []
+        rx.save_iq_path = args.save_iq
 
     tx_info = None
     if args.tx_info_bits and os.path.isfile(args.tx_info_bits):

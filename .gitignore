@@ -4,3 +4,5 @@ __pycache__/
 # 保留 deploy 目录下的 .npy 和 .pt 文件
 !deploy/matrices/*.npy
 !deploy/checkpoint/*.pt
+'*.bin'  
+'*.npy'  
