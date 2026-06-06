@@ -138,14 +138,19 @@ def main():
     if args.multipath:
         print(f"  多径:     {args.multipath}")
 
-    tx = np.load(args.input)
+    # Support both .npy and raw binary (interleaved float32 I/Q)
+    if args.input.endswith('.npy'):
+        tx = np.load(args.input)
+    else:
+        tx = np.fromfile(args.input, dtype=np.complex64)
     print(f"  输入:     {len(tx)} 复样本 ({len(tx) / args.rate * 1000:.1f} ms)")
 
     ch = SimChannel(samp_rate=args.rate)
     rx = ch.process(tx, snr_db=args.snr_db, freq_offset=args.freq_offset,
                     phase_offset=args.phase_offset, multipath=args.multipath)
 
-    np.save(args.output, rx)
+    # Output as raw binary (interleaved float32 I/Q) for C++ rx
+    rx.astype(np.complex64).tofile(args.output)
     print(f"  输出:     {len(rx)} 复样本 → {args.output}")
     print(f"[sim_channel] 完成")
 
