@@ -1,8 +1,10 @@
-__pycache__/
-*.pyc
-*.npy
-# 保留 deploy 目录下的 .npy 和 .pt 文件
-!deploy/matrices/*.npy
-!deploy/checkpoint/*.pt
 '*.bin'  
 '*.npy'  
+'__pycache__/'  
+'check_*.py'  
+'demod_*.py'  
+'diagnose_*.py'  
+'phy_ber_*.py'  
+'test_*.py'  
+'visualize_*.py'  
+'*.png'  

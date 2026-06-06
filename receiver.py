@@ -76,9 +76,9 @@ class BpskPhyReceiver:
         self.Ts = sps / samp_rate
         self.decoder_callback = decoder_callback
         self.running = False
-        self.win = np.zeros(131072, dtype=np.complex64)
+        self.win = np.zeros(1000000, dtype=np.complex64)
         self.win_len = 0
-        self.win_cap = 131072
+        self.win_cap = 1000000
         self.total_frames = 0
         self.total_bits = 0
         self.total_errors = 0
@@ -105,7 +105,7 @@ class BpskPhyReceiver:
 
     # ── 接收核心 ──
     def _process_window(self, tx_bits):
-        """处理窗口: RRC匹配 → RS全窗口滑动相关 → PSS频偏 → 数据."""
+        """处理窗口: RRC匹配 → RS同步 → PSS频偏 → 数据."""
         r = self.win[:self.win_len]
         min_samp = FRAME_SYMBOLS * self.sps
         if self.win_len < min_samp:
@@ -113,11 +113,12 @@ class BpskPhyReceiver:
 
         symbols = _rrc_match(r, RRC_TX, self.sps)
 
-        # ── ① RS 全窗口滑动相关 (用 np.correlate 加速) ──
-        rs_corr = np.abs(np.correlate(symbols, REF_RS, mode='valid'))
-        thr = 2.0  # 固定阈值
-        peaks = [i for i in range(1, len(rs_corr)-1)
-                 if rs_corr[i] > thr and rs_corr[i] > rs_corr[i-1] and rs_corr[i] > rs_corr[i+1]]
+        # ── ① RS 滑动相关 (找帧) ──
+        rs_corr = np.correlate(symbols, REF_RS, mode='valid')  # 复数, 保留相位
+        rs_mag = np.abs(rs_corr)
+        thr = max(2.0, np.mean(rs_mag) * 5)
+        peaks = [i for i in range(1, len(rs_mag)-1)
+                 if rs_mag[i] > thr and rs_mag[i] > rs_mag[i-1] and rs_mag[i] > rs_mag[i+1]]
         if not peaks:
             return
 
@@ -137,27 +138,38 @@ class BpskPhyReceiver:
         if p < 0 or p + PSS_LEN + RS_LEN + DATA_LEN > len(symbols):
             return
 
-        # ── ② RS频偏估计 (比PSS更鲁棒, 已知精确位置) ──
-        rs_start = p + PSS_LEN
-        rs_seg = symbols[rs_start:rs_start + RS_LEN]
-        rs_tone = rs_seg * np.conj(REF_RS)
-        rs_phase = np.unwrap(np.angle(rs_tone))
-        nn16 = np.arange(RS_LEN, dtype=np.float64)
-        slope = (np.sum(nn16 * rs_phase) - np.mean(nn16) * np.sum(rs_phase)) / (np.sum(nn16**2) - RS_LEN * np.mean(nn16)**2)
+        # ── ② PSS 频偏估计 (32符号, 精度比RS的16符号高√2倍) ──
+        pss_seg = symbols[p:p + PSS_LEN]
+        pss_tone = pss_seg * np.conj(REF_PSS)
+        pss_phase = np.unwrap(np.angle(pss_tone))
+        nn32 = np.arange(PSS_LEN, dtype=np.float64)
+        slope = (np.sum(nn32 * pss_phase) - np.mean(nn32) * np.sum(pss_phase)) / \
+                (np.sum(nn32**2) - PSS_LEN * np.mean(nn32)**2)
         freq_est = slope / (2 * np.pi * self.Ts)
-        rs_val = np.abs(np.dot(rs_seg, np.conj(REF_RS)))
 
-        # ── ③ 数据提取 ──
+        # ── ③ RS 解决 π 相位模糊 ──
+        rs_seg = symbols[p + PSS_LEN:p + PSS_LEN + RS_LEN]
+        rs_dot = np.dot(rs_seg, np.conj(REF_RS))  # 保留符号, 不用 abs
+        rs_val = np.abs(rs_dot)
+        if rs_dot.real < 0:
+            # BPSK 相位翻转 180°, 翻转极性
+            flip_phase = np.pi
+        else:
+            flip_phase = 0.0
+
+        # ── ④ 数据提取 + 频偏校正 + 相位校正 ──
         data_start = p + PSS_LEN + RS_LEN
         if data_start + DATA_LEN > len(symbols):
             return
         n_data = np.arange(DATA_LEN)
         data_syms = symbols[data_start:data_start + DATA_LEN]
-        data_corrected = data_syms * np.exp(-1j * 2 * np.pi * freq_est * (data_start + n_data) * self.Ts)
+        correction = np.exp(-1j * (2 * np.pi * freq_est * (data_start + n_data) * self.Ts + flip_phase))
+        data_corrected = data_syms * correction
 
-        # ── ④ LLR + 硬判决 ──
-        self.sigma_est = 1.0 / np.sqrt(2 * 10**(15/10))
-        llr = (2.0 * data_corrected.real.astype(np.float32)) / (self.sigma_est ** 2)
+        # ── ⑤ LLR + 硬判决 (幅度归一化) ──
+        amp = max(np.std(data_corrected.real), 0.01)
+        sigma_est = 0.5  # 匹配 SGNN 训练条件
+        llr = (2.0 * data_corrected.real.astype(np.float32) / amp) / (sigma_est ** 2)
         rx_bits = (llr < 0).astype(np.int64)
 
         if self.total_frames < 10 or self.total_frames % 10 == 0:
@@ -241,6 +253,11 @@ class BpskPhyReceiver:
                     self._iq_buffer.append(uhd_buf[0, :ns].copy())
                     if len(self._iq_buffer) >= 2048:
                         self._flush_iq()
+                # 每100个recv打印一次状态
+                if rx_count % 100 == 0 and rx_count > 0:
+                    elapsed = time.time() - t_start
+                    print(f"  [rx] 累计{rx_count}包 win={self.win_len} "
+                          f"O={self.overflow_count} t={elapsed:.1f}s", flush=True)
                 # 只有窗口积累足够数据才处理 (每 ~200ms 一次)
                 # TX帧间隔100ms, 200ms窗口保证至少抓到一帧
                 if self.win_len >= 200000:
