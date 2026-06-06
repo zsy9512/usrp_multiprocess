@@ -120,15 +120,15 @@ static std::vector<float> design_rrc() {
 // ===================================================================
 // 4.  帧打包
 // ===================================================================
-static std::vector<C64> build_frame(const std::vector<int>& dataBits) {
+static std::vector<C64> build_frame(const std::vector<int>& dataBits, uint16_t frameId) {
     // payload CRC
     uint8_t payloadBytes[PAYLOAD_LEN / 8] = {};
     for (int i = 0; i < PAYLOAD_LEN; i++)
         payloadBytes[i / 8] = (uint8_t)((payloadBytes[i / 8] << 1) | (dataBits[i] & 1));
     uint16_t payCrc = crc16(payloadBytes, PAYLOAD_LEN / 8);
 
-    // header: reserved(16 zero bits) + header CRC
-    uint8_t hdrBytes[2] = {0, 0};  // reserved = 0
+    // header: frame_id(16bit) + header CRC
+    uint8_t hdrBytes[2] = {(uint8_t)(frameId>>8), (uint8_t)(frameId&0xFF)};
     uint16_t hdrCrc = crc16(hdrBytes, 2);
 
     // assemble frame symbols
@@ -147,16 +147,11 @@ static std::vector<C64> build_frame(const std::vector<int>& dataBits) {
     auto rs = gen_rs();
     frame.insert(frame.end(), rs.begin(), rs.end());
 
-    // Header: 16 reserved + 16 CRC bits → BPSK
-    for (int i = 15; i >= 0; i--)  // MSB first
-        frame.push_back(C64(0.0f, 0.0f));  // reserved = 0 → BPSK +1 → wait, _bpsk(0)=1.0
-    // Actually _bpsk: 0→+1, 1→-1. For reserved=0: +1.0
-    frame.resize(frame.size() - 16);  // remove wrong entries, redo properly
+    // Header: 16 frame_id + 16 CRC bits → BPSK
     for (int i = 15; i >= 0; i--)
-        frame.push_back(C64(1.0f, 0.0f));  // bit 0 → +1.0
-    uint16_t hc = hdrCrc;
+        frame.push_back(C64(((frameId>>i)&1) ? -1.0f : 1.0f, 0.0f));
     for (int i = 15; i >= 0; i--) {
-        int bit = (hc >> i) & 1;
+        int bit = (hdrCrc >> i) & 1;
         frame.push_back(C64(bit ? -1.0f : 1.0f, 0.0f));
     }
 
@@ -215,15 +210,16 @@ static std::vector<int> random_bits(int n) {
     return bits;
 }
 
-static std::vector<int> read_bits_stdin() {
-    // read 32 bytes (256 bits) from stdin
-    uint8_t buf[32];
-    size_t n = fread(buf, 1, 32, stdin);
-    if (n < 32) return {};
+static std::vector<int> read_bits_stdin(uint16_t& frameId) {
+    // read 4B frame_id + 32B = 36 bytes from stdin
+    uint8_t buf[36];
+    size_t n = fread(buf, 1, 36, stdin);
+    if (n < 36) return {};
+    frameId = ((uint16_t)buf[0]<<8) | buf[1];
     std::vector<int> bits(256);
     for (int i = 0; i < 32; i++)
         for (int b = 7; b >= 0; b--)
-            bits[i*8 + (7-b)] = (buf[i] >> b) & 1;
+            bits[i*8 + (7-b)] = (buf[4+i] >> b) & 1;
     return bits;
 }
 
@@ -268,14 +264,15 @@ int main(int argc, char* argv[]) {
 
     while (numFrames == 0 || frameCount < numFrames) {
         std::vector<int> dataBits;
+        uint16_t frameId = frameCount;
         if (randomMode)
             dataBits = random_bits(PAYLOAD_LEN);
         else {
-            dataBits = read_bits_stdin();
+            dataBits = read_bits_stdin(frameId);
             if (dataBits.empty()) break;
         }
 
-        auto frameSyms = build_frame(dataBits);
+        auto frameSyms = build_frame(dataBits, frameId);
         auto txSig = rrc_filter(frameSyms, rrc);
 
         // write interleaved float32 I/Q

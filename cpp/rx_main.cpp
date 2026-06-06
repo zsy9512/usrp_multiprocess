@@ -475,15 +475,22 @@ static const std::vector<float> RRC   = design_rrc();
 int main(int argc, char* argv[]) {
     init_crc16_table();
 
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <iq_file.bin>\n", argv[0]);
-        fprintf(stderr, "  iq_file.bin: interleaved float32 I/Q pairs\n");
-        fprintf(stderr, "  Output: 256 float32 LLR per frame → stdout\n");
+    bool crcFilter = false;
+    const char* iqFile = nullptr;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--crc-filter")) crcFilter = true;
+        else iqFile = argv[i];
+    }
+
+    if (!iqFile) {
+        fprintf(stderr, "Usage: %s [--crc-filter] <iq_file.bin>\n", argv[0]);
+        fprintf(stderr, "  --crc-filter:  only output frames with valid CRC\n");
+        fprintf(stderr, "  Output: [4B frame_id][256 float LLR][1B crc_ok] per frame → stdout\n");
         return 1;
     }
 
     // --- open IQ file ---
-    FILE* fp = fopen(argv[1], "rb");
+    FILE* fp = fopen(iqFile, "rb");
     if (!fp) { perror("fopen"); return 1; }
     fseek(fp, 0, SEEK_END);
     long fileSize = ftell(fp);
@@ -602,8 +609,13 @@ int main(int argc, char* argv[]) {
                                          payBits.begin() + PAYLOAD_LEN + CRC_LEN);
                 bool payCrcOk = verify_payload_crc(payloadBits, crcBits);
 
+                // Extract frame_id from header bits
+                uint16_t frameId = 0;
+                for (int i = 0; i < 16; i++)
+                    frameId = (uint16_t)((frameId << 1) | (hdrBits[i] & 1));
+
                 totalFrames++;
-                if (payCrcOk) crcPass++;
+                if (payCrcOk) crcPass++; 
 
                 // metrics
                 float totalCfo = coarseCfo + fineCfo;
@@ -622,11 +634,17 @@ int main(int argc, char* argv[]) {
                     fflush(stderr);
                 }
 
-                // stage 5: output LLR (payload only, 256 floats)
-                auto payloadLlr = std::vector<float>(
-                    payLlr.begin(), payLlr.begin() + PAYLOAD_LEN);
-                fwrite(payloadLlr.data(), sizeof(float), PAYLOAD_LEN, stdout);
-                fflush(stdout);
+                // stage 5: output [4B frame_id][256 float LLR][1B crc_ok]
+                if (!crcFilter || payCrcOk) {
+                    uint8_t idBuf[4] = {(uint8_t)(frameId>>8), (uint8_t)(frameId&0xFF), 0, 0};
+                    fwrite(idBuf, 1, 4, stdout);
+                    auto payloadLlr = std::vector<float>(
+                        payLlr.begin(), payLlr.begin() + PAYLOAD_LEN);
+                    fwrite(payloadLlr.data(), sizeof(float), PAYLOAD_LEN, stdout);
+                    uint8_t crcByte = payCrcOk ? 1 : 0;
+                    fwrite(&crcByte, 1, 1, stdout);
+                    fflush(stdout);
+                }
 
                 // consume window
                 int consumeEnd = frameSampleStart + FRAME_RRC_SAMPLES;

@@ -8,7 +8,7 @@ polar_encode.py — 极化码编码器 (stdin/stdout 管道)
   python polar_encode.py --frames 100 | ./tx -o tx_iq.bin
   python polar_encode.py --frames 100 --save-info info.npy | ./tx -o tx_iq.bin
 """
-import argparse, os, sys, numpy as np
+import argparse, os, sys, struct, numpy as np
 
 # ── 加载冻结比特掩膜 ──
 MATRICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'matrices')
@@ -49,12 +49,13 @@ def main():
 
     info_all = [] if args.save_info else None
 
-    for _ in range(args.frames):
+    for fi in range(args.frames):
         info = np.random.randint(0, 2, K).astype(np.int64)
         cw = build_codeword(info)
-        # pack 256 bits → 32 bytes (MSB first, same as C++ tx read_bits_stdin)
+        # [4B frame_id (uint16 BE)][32B codeword]
+        header = struct.pack('>H', fi) + b'\x00\x00'
         buf = np.packbits(cw.astype(np.uint8)).tobytes()
-        sys.stdout.buffer.write(buf)
+        sys.stdout.buffer.write(header + buf)
         if info_all is not None:
             info_all.append(info)
 
