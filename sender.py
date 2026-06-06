@@ -71,8 +71,9 @@ def _gen_rs() -> np.ndarray:
 
 
 def _design_rrc(sps: int, rolloff: float = 0.35, num_sym: int = 10) -> np.ndarray:
-    n_taps = num_sym * sps
-    t = np.arange(-num_sym / 2, num_sym / 2, 1 / sps)
+    """RRC 脉冲成形滤波器. 奇数抽头保证符号定时对齐."""
+    n_taps = num_sym * sps + 1  # 奇数长度, 保证中心对称
+    t = np.linspace(-num_sym / 2, num_sym / 2, n_taps)
     h = np.zeros_like(t)
     for i, ti in enumerate(t):
         if abs(ti) < 1e-12:

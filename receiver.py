@@ -35,8 +35,9 @@ def _ref_rs():
     return (2 * rng.randint(0, 2, RS_LEN) - 1).astype(np.complex64)
 
 def _design_rrc(sps=2, rolloff=0.35, num_sym=10):
-    n_taps = num_sym * sps
-    t = np.arange(-num_sym / 2, num_sym / 2, 1 / sps)
+    """奇数抽头RRC, 确保符号定时对齐."""
+    n_taps = num_sym * sps + 1  # 奇数长度
+    t = np.linspace(-num_sym / 2, num_sym / 2, n_taps)
     h = np.zeros_like(t)
     for i, ti in enumerate(t):
         if abs(ti) < 1e-12:
@@ -51,8 +52,9 @@ def _design_rrc(sps=2, rolloff=0.35, num_sym=10):
     return (h / np.sqrt(np.sum(h**2))).astype(np.float32)
 
 def _rrc_match(samples, rrc, sps):
+    """RRC 匹配滤波 + 符号同步. rrc 为奇数长度, 延迟 = len(rrc)-1."""
     filt = np.convolve(samples, rrc, mode='full')
-    delay = (len(rrc) - 1) // 2 + (sps // 2)
+    delay = len(rrc) - 1  # 奇数抽头RRC的完整群延迟
     return filt[delay::sps]
 
 def _parabolic_interp(cp, peak):
