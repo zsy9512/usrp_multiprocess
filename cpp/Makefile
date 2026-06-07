@@ -16,13 +16,21 @@ endif
 
 all: rx tx
 
-rx: rx_main.cpp
+rx: rx_main.cpp phy_dsp.h
 	$(CXX) $(CXXFLAGS) rx_main.cpp -o rx$(EXE_EXT) $(LDFLAGS)
 
-tx: tx_main.cpp
+tx: tx_main.cpp phy_dsp.h
 	$(CXX) $(CXXFLAGS) tx_main.cpp -o tx$(EXE_EXT) $(LDFLAGS)
 
-clean:
-	rm -f rx$(EXE_EXT) tx$(EXE_EXT)
+# UHD 目标 (使用本地 libuhd.a + uhd.dll, 需 UHD 头文件)
+UHD_INC  ?= /usr/local/include
+uhd_tx: uhd_tx_main.cpp phy_dsp.h
+	$(CXX) $(CXXFLAGS) -I$(UHD_INC) uhd_tx_main.cpp -o uhd_tx$(EXE_EXT) $(LDFLAGS) -L. -luhd
 
-.PHONY: all clean
+uhd_rx: uhd_rx_main.cpp phy_dsp.h
+	$(CXX) $(CXXFLAGS) -I$(UHD_INC) uhd_rx_main.cpp -o uhd_rx$(EXE_EXT) $(LDFLAGS) -L. -luhd
+
+clean:
+	rm -f rx$(EXE_EXT) tx$(EXE_EXT) uhd_tx$(EXE_EXT) uhd_rx$(EXE_EXT)
+
+.PHONY: all clean uhd_tx uhd_rx

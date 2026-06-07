@@ -21,6 +21,8 @@ receiver.py — BPSK PHY 接收端 (完整三级同步链)
 from __future__ import annotations
 
 import argparse, os, sys, time
+import multiprocessing as mp
+from multiprocessing import shared_memory, Process, Event, Value
 from typing import Optional, Tuple
 import numpy as np
 
@@ -100,6 +102,39 @@ def _compute_coarse_cfo(P_peak: complex, L_samples: int, samp_rate: float) -> fl
     return -phase / (2 * np.pi * L_samples / samp_rate)
 
 
+def _stf_cluster_peaks(metric: np.ndarray, P: np.ndarray,
+                       samples: np.ndarray,
+                       samp_rate: float) -> Tuple[list, list]:
+    """STF 峰值聚类去重 (对齐 loopback_test 128-sample 窗).
+
+    按 M 排序, 128-sample 窗内只保留最强峰.
+    Returns:
+        peaks: list[int] 聚类后峰位置
+        cfos:  list[float] 对应粗 CFO
+    """
+    L = STF_DELAY
+    N = len(samples)
+    raw = []
+    for d in range(len(metric)):
+        if metric[d] > STF_THRESHOLD:
+            local_E = np.sum(np.abs(samples[d + L:d + 2 * L]) ** 2)
+            if local_E > STF_MIN_ENERGY:
+                raw.append((d, metric[d], P[d]))
+    if not raw:
+        return [], []
+
+    raw.sort(key=lambda x: x[1], reverse=True)
+    peaks, cfos, used = [], [], set()
+    for d, _, p in raw:
+        if d in used:
+            continue
+        for dx in range(max(0, d - 128), min(len(metric), d + 128)):
+            used.add(dx)
+        peaks.append(d)
+        cfos.append(_compute_coarse_cfo(p, L, samp_rate))
+    return peaks, cfos
+
+
 def _pss_correlation(symbols: np.ndarray) -> Tuple[np.ndarray, int, float, float]:
     """PSS 互相关: 精定时 + 质量判据.
 
@@ -140,15 +175,19 @@ def _pss_correlation(symbols: np.ndarray) -> Tuple[np.ndarray, int, float, float
 
 
 def _rs_fine_cfo(symbols: np.ndarray, rs_pos: int,
-                 coarse_cfo: float = 0.0) -> Tuple[float, float]:
+                 coarse_cfo: float = 0.0,
+                 Ts_sym: float = None) -> Tuple[float, float]:
     """RS 线性相位拟合: 粗CFO预补偿后估计残余细CFO.
 
     Args:
         coarse_cfo: STF粗CFO (Hz), 先补偿再拟合, 大幅提升大频偏下精度
+        Ts_sym:     符号时间 (s), 默认 TS*SPS = 2e-6
     Returns:
         fine_cfo: 残余细 CFO (Hz)
         rs_corr: RS 相关幅度 (用于质量判定)
     """
+    if Ts_sym is None:
+        Ts_sym = TS * SPS
     if rs_pos + RS_LEN > len(symbols):
         return 0.0, 0.0
 
@@ -157,7 +196,7 @@ def _rs_fine_cfo(symbols: np.ndarray, rs_pos: int,
     # 粗 CFO 预补偿: 消除大频偏, 让 unwrap 和线性拟合工作在残余小频偏上
     if abs(coarse_cfo) > 0:
         n_rs = np.arange(RS_LEN)
-        pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * TS)
+        pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * Ts_sym)
         rs_seg = rs_seg * pre_comp
 
     rs_tone = rs_seg * np.conj(_REF_RS)
@@ -172,31 +211,32 @@ def _rs_fine_cfo(symbols: np.ndarray, rs_pos: int,
     den = np.sum((n - n_mean) ** 2)
     slope = num / (den + 1e-30)
 
-    residual_cfo = slope / (2 * np.pi * TS)
+    residual_cfo = slope / (2 * np.pi * Ts_sym)
     return float(residual_cfo), rs_corr
 
 
 def _rs_channel_estimate(symbols: np.ndarray, rs_pos: int,
                          fine_cfo: float,
-                         coarse_cfo: float = 0.0) -> Tuple[complex, float, float]:
+                         coarse_cfo: float = 0.0,
+                         Ts_sym: float = None) -> Optional[Tuple[complex, float, float]]:
     """RS 信道/相位/噪声估计 (粗CFO+细CFO联合补偿).
 
     Returns:
-        h: 复信道增益 (含公共相位)
-        phase_est: 公共相位 (rad)
-        sigma2: 噪声方差
+        (h, phase_est, sigma2) or None if |h| < 1e-6
     """
+    if Ts_sym is None:
+        Ts_sym = TS * SPS
     if rs_pos + RS_LEN > len(symbols):
-        return 1.0 + 0j, 0.0, 0.1
+        return None
 
     rs_seg = symbols[rs_pos:rs_pos + RS_LEN]
     n_rs = np.arange(RS_LEN)
     total_cfo = coarse_cfo + fine_cfo
-    rs_corrected = rs_seg * np.exp(-1j * 2 * np.pi * total_cfo * (rs_pos + n_rs) * TS)
+    rs_corrected = rs_seg * np.exp(-1j * 2 * np.pi * total_cfo * (rs_pos + n_rs) * Ts_sym)
 
     h = np.mean(rs_corrected * np.conj(_REF_RS))
-    if abs(h) < 1e-30:
-        return 1.0 + 0j, 0.0, 0.1
+    if abs(h) < 1e-6:
+        return None
 
     rs_eq = rs_corrected / h
     # Welch 校正: 32符号LS估计, 噪声方差偏小 ~1/32, 乘 N/(N-1) 修正
@@ -207,37 +247,33 @@ def _rs_channel_estimate(symbols: np.ndarray, rs_pos: int,
     return h, phase_est, max(sigma2, 1e-30)
 
 
-def _demod_llr(symbols: np.ndarray, data_start: int, data_len: int,
-               h: complex, phase_est: float, fine_cfo: float,
-               sigma2: float, coarse_cfo: float = 0.0) -> np.ndarray:
-    """BPSK 解调: 粗CFO+细CFO联合补偿 → 相位校正 → 信道均衡 → LLR.
+def _bpsk_demod_hard(symbols: np.ndarray, data_start: int, data_len: int,
+                     h: complex, total_cfo: float,
+                     Ts_sym: float = None) -> np.ndarray:
+    """BPSK 硬判决解调 (对齐 loopback_test _bpsk_demod).
 
-    y = data_syms * exp(-j*2π*Δf_total*t) * exp(-j*θ) / h
-    llr = 2 * real(y) / σ²
+    CFO全补偿 + 除以h (含相位校正) → sign(real).
     """
+    if Ts_sym is None:
+        Ts_sym = TS * SPS
     if data_start + data_len > len(symbols):
-        return np.zeros(data_len, dtype=np.float32)
+        return np.zeros(data_len, dtype=np.int64)
 
-    data_seg = symbols[data_start:data_start + data_len]
+    seg = symbols[data_start:data_start + data_len]
     n = np.arange(data_len)
-    total_cfo = coarse_cfo + fine_cfo
-    cfo_comp = np.exp(-1j * 2 * np.pi * total_cfo * (data_start + n) * TS)
-
-    y = data_seg * cfo_comp
-    y = y * np.exp(-1j * phase_est)
+    cfo_comp = np.exp(-1j * 2 * np.pi * total_cfo * (data_start + n) * Ts_sym)
+    y = seg * cfo_comp
     if abs(h) > 1e-30:
         y = y / h
-
-    llr = (2.0 * y.real.astype(np.float32)) / (sigma2 + 1e-30)
-    llr = np.clip(llr, -50.0, 50.0)
-    return llr
+    return (y.real < 0).astype(np.int64)
 
 
 def _estimate_snr(symbols: np.ndarray, rs_pos: int,
                   fine_cfo: float, h: complex,
-                  coarse_cfo: float = 0.0) -> Tuple[float, float]:
+                  coarse_cfo: float = 0.0,
+                  Ts_sym: float = None) -> Tuple[float, float]:
     """从 RS 估计 SNR 和 EVM."""
-    _, _, sigma2 = _rs_channel_estimate(symbols, rs_pos, fine_cfo, coarse_cfo)
+    _, _, sigma2 = _rs_channel_estimate(symbols, rs_pos, fine_cfo, coarse_cfo, Ts_sym)
     signal_power = abs(h) ** 2
     if sigma2 > 0:
         snr = signal_power / sigma2
@@ -258,14 +294,14 @@ def _crc_bits_to_int(crc_bits: np.ndarray) -> int:
 
 
 def _verify_header(header_bits: np.ndarray) -> bool:
-    """验证 Header CRC."""
+    """验证 Header CRC (frame_id + CRC16)."""
     if len(header_bits) < HEADER_LEN:
         return False
-    reserved = header_bits[:16]
+    id_bits = header_bits[:16]
     crc_bits = header_bits[16:32]
     expected_crc = _crc_bits_to_int(crc_bits)
-    header_bytes = bits_to_bytes(reserved)
-    return crc16_check(header_bytes, expected_crc)
+    id_bytes = bits_to_bytes(id_bits)
+    return crc16_check(id_bytes, expected_crc)
 
 
 def _verify_payload_crc(payload_bits: np.ndarray, crc_bits: np.ndarray) -> bool:
@@ -276,17 +312,93 @@ def _verify_payload_crc(payload_bits: np.ndarray, crc_bits: np.ndarray) -> bool:
 
 
 # ======================================================================
+# 共享内存收样子进程 (多进程零拷贝, 防止 FPGA overflow)
+# ======================================================================
+
+RING_CAP = 2_000_000  # 2M 样本共享内存环形缓冲
+
+
+def _recv_proc(shm_name, serial, freq, gain, rate, subdev, sync_mode, settle_s,
+               wr_count, has_data, running, ovf_count):
+    """收样子进程: UHD recv() → shared_memory ring buffer (零拷贝, wr_count 单调递增)."""
+    import uhd
+
+    dev_args = f'serial={serial}' if serial else ''
+    usrp = uhd.usrp.MultiUSRP(dev_args)
+    if subdev:
+        try: usrp.set_rx_subdev_spec(subdev)
+        except: pass
+    usrp.set_rx_freq(uhd.types.TuneRequest(freq))
+    usrp.set_rx_gain(gain)
+    usrp.set_rx_rate(rate)
+    usrp.set_rx_bandwidth(rate)
+    usrp.set_rx_antenna("RX2")
+
+    if sync_mode in ('host', 'internal'):
+        usrp.set_clock_source("internal"); usrp.set_time_source("internal")
+    elif sync_mode == 'external_ref':
+        usrp.set_clock_source("external"); usrp.set_time_source("internal")
+        time.sleep(settle_s)
+    pc_ns = time.time_ns()
+    tspec = uhd.types.TimeSpec(pc_ns // 1_000_000_000, (pc_ns % 1_000_000_000) / 1e9)
+    usrp.set_time_now(tspec)
+
+    stream_args = uhd.usrp.StreamArgs('fc32', 'sc16')
+    stream_args.channels = [0]
+    rx_stream = usrp.get_rx_stream(stream_args)
+    rx_stream.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.start_cont))
+
+    shm = shared_memory.SharedMemory(name=shm_name)
+    ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
+
+    md = uhd.types.RXMetadata()
+    buf = np.zeros((1, 4096), dtype=np.complex64)
+    w = 0
+
+    while running.value:
+        ns = rx_stream.recv(buf, md, timeout=0.2)
+        if ns == 0: continue
+        if md.error_code == uhd.types.RXMetadataErrorCode.overflow:
+            ovf_count.value += 1; continue
+
+        data = buf[0, :ns]
+        end = w + ns
+        if end <= RING_CAP:
+            ring[w:end] = data
+        else:
+            n1 = RING_CAP - w
+            ring[w:] = data[:n1]
+            ring[:ns - n1] = data[n1:]
+        w = end % RING_CAP
+        wr_count.value += ns
+        has_data.set()
+
+    rx_stream.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
+    shm.close()
+
+
+# ======================================================================
 # Receiver 类
 # ======================================================================
 
 class BpskPhyReceiver:
     """BPSK PHY 接收端 (完整三级同步链)."""
 
-    def __init__(self, samp_rate: float = 1e6, sps: int = SPS):
+    def __init__(self, samp_rate: float = 1e6, sps: int = SPS,
+                 stf_threshold: float = STF_THRESHOLD,
+                 pss_ptm: float = 3.5,
+                 pss_pts: float = PSS_PEAK_TO_SECOND_THR,
+                 rs_corr_thr: float = 0.3):
         self.samp_rate = samp_rate
         self.sps = sps
         self.Ts = 1.0 / samp_rate
         self.Ts_sym = sps / samp_rate
+
+        # --- 同步门限 ---
+        self.stf_threshold = stf_threshold
+        self.pss_ptm = pss_ptm
+        self.pss_pts = pss_pts
+        self.rs_corr_thr = rs_corr_thr
 
         # --- 环形缓冲 ---
         self.buf_cap = int(samp_rate)  # 1 秒缓冲
@@ -299,8 +411,6 @@ class BpskPhyReceiver:
         self.header_crc_pass = 0
         self.detection_attempts = 0
         self.false_alarms = 0
-        self.total_bits = 0
-        self.total_errors = 0
         self.overflow_count = 0
 
         # --- 连续帧跟踪 ---
@@ -311,7 +421,6 @@ class BpskPhyReceiver:
         self._save_iq_path = ""
 
         # --- 帧历史 ---
-        self.tx_ref_bits = None
 
         # --- 运行时状态 ---
         self.running = False
@@ -323,23 +432,18 @@ class BpskPhyReceiver:
     # ================================================================
 
     def start(self, mode: str = 'sim', freq: float = 915e6, gain: float = 30,
-              sim_file: str = 'rx_iq.npy', tx_bits_file: str = '',
+              sim_file: str = 'rx_iq.npy',
               snr_db: float = 15.0, usrp_args: str = '', subdev: str = 'A:A',
-              save_iq: str = ''):
+              save_iq: str = '', sync_mode: str = 'host', settle_s: float = 1.0):
         """启动接收."""
         self.running = True
-
-        if tx_bits_file and os.path.isfile(tx_bits_file):
-            self.tx_ref_bits = np.load(tx_bits_file)
-            print(f"[receiver] 加载 {len(self.tx_ref_bits)} 参考比特")
 
         if save_iq:
             self._save_iq_path = save_iq
             self._iq_buffer = []
 
         if mode == 'hardware':
-            self._init_usrp(freq, gain, usrp_args, subdev)
-            self._rx_loop_hardware()
+            self._rx_loop_mp(freq, gain, usrp_args, subdev, sync_mode, settle_s)
         else:
             self._rx_loop_sim(sim_file)
 
@@ -350,7 +454,7 @@ class BpskPhyReceiver:
     # 接收处理核心
     # ================================================================
 
-    def _process_samples(self, new_samples: np.ndarray, tx_bits=None):
+    def _process_samples(self, new_samples: np.ndarray):
         """添加新样本到缓冲, 然后尝试检测和处理帧."""
         self._append_to_buf(new_samples)
         self._detect_and_demod()
@@ -370,45 +474,36 @@ class BpskPhyReceiver:
         self.buf_len += space
 
     def _detect_and_demod(self):
-        """检测 → 同步 → 解调 → 消费窗口."""
+        """检测 → 同步 → 解调 → 消费窗口 (对齐 loopback_test)."""
         r = self.buf[:self.buf_len]
 
         while self.running and self.buf_len >= MIN_WIN_SAMPLES:
             self.detection_attempts += 1
 
-            # ===== 阶段 1: STF 延迟相关 → 候选位置 =====
+            # ===== 阶段 1: STF 延迟相关 + 峰值聚类 =====
             metric, P = _stf_delay_correlation(r)
             if len(metric) == 0:
                 break
 
-            candidates = []
-            for d in range(len(metric)):
-                if metric[d] > STF_THRESHOLD:
-                    local_E = np.sum(np.abs(r[d + STF_DELAY:d + 2 * STF_DELAY]) ** 2)
-                    if local_E > STF_MIN_ENERGY:
-                        candidates.append(d)
-
-            if not candidates:
+            peaks, cfos = _stf_cluster_peaks(metric, P, r, self.samp_rate)
+            if not peaks:
                 self._advance_window(ADVANCE_SAMPLES)
-                self._expected_frame_start = -1
                 continue
 
             frame_found = False
-            for candidate_d in candidates[:32]:
-                coarse_sample_pos = candidate_d
+            for pi in range(min(8, len(peaks))):
+                d = peaks[pi]
+                coarse_cfo = cfos[pi]
+                coarse = d  # 样本域 STF 检测位置
 
-                if candidate_d < len(P):
-                    coarse_cfo = _compute_coarse_cfo(
-                        P[candidate_d], STF_DELAY, self.samp_rate)
-                else:
-                    coarse_cfo = 0.0
-
-                # ===== 阶段 2: PSS 精定时验证 =====
-                margin = PSS_SEARCH_WIN_SAMPLES
-                extract_start = max(0, coarse_sample_pos - margin)
+                # ===== 阶段 2: 提取窗口 + PSS 精定时 =====
+                EXTRACT_EXTRA_ = 200  # 对齐 loopback_test
+                extract_start = max(0, coarse - EXTRACT_EXTRA_)
                 extract_end = min(self.buf_len,
-                                  coarse_sample_pos + margin + FRAME_RRC_SAMPLES)
+                                  coarse + EXTRACT_EXTRA_ + FRAME_RRC_SAMPLES + EXTRACT_EXTRA_)
                 chunk = r[extract_start:extract_end]
+                if len(chunk) < PSS_LEN * self.sps:
+                    continue
 
                 symbols = _rrc_match_conj(chunk, _RRC)
                 if len(symbols) < PSS_LEN + RS_LEN:
@@ -416,51 +511,48 @@ class BpskPhyReceiver:
 
                 _, pss_peak, ptm, pts = _pss_correlation(symbols)
 
-                if ptm < PSS_PEAK_TO_MEAN_THR or pts < PSS_PEAK_TO_SECOND_THR:
+                if ptm < self.pss_ptm or pts < self.pss_pts:
                     continue
 
-                pss_start = pss_peak
-                frame_sym_start = pss_start - STF_LEN
-                if frame_sym_start < 0:
+                fs = pss_peak - STF_LEN               # 帧起始符号索引
+                if fs < 0:
                     continue
 
-                rrc_delay = (len(_RRC) - 1) // 2
-                frame_sample_start = (extract_start
-                                      + frame_sym_start * self.sps
-                                      - rrc_delay)
-                if frame_sample_start < 0:
+                rp = fs + STF_LEN + PSS_LEN           # RS 起始符号索引
+                if rp + RS_LEN + HEADER_LEN + PAYLOAD_LEN + PAYLOAD_CRC_LEN > len(symbols):
                     continue
 
-                # ===== 阶段 3: RS 细 CFO + 相位 + 信道 =====
-                rs_sym_start = frame_sym_start + STF_LEN + PSS_LEN
-                fine_cfo, rs_corr = _rs_fine_cfo(symbols, rs_sym_start, coarse_cfo)
-
-                if rs_corr < RS_LEN * 0.3:
+                # ===== 阶段 3: RS 细 CFO + 信道估计 =====
+                fine_cfo, rs_corr = _rs_fine_cfo(symbols, rp, coarse_cfo, self.Ts_sym)
+                if rs_corr < RS_LEN * self.rs_corr_thr:
+                    continue
+                if abs(fine_cfo) > 500:               # 细CFO超限 → 拒收
                     continue
 
-                h, phase_est, sigma2 = _rs_channel_estimate(
-                    symbols, rs_sym_start, fine_cfo, coarse_cfo)
+                chan = _rs_channel_estimate(symbols, rp, fine_cfo, coarse_cfo, self.Ts_sym)
+                if chan is None:
+                    continue
+                h, phase_est, sigma2 = chan
+                sigma2 = min(sigma2, 0.5)
 
-                # ===== 阶段 4: 解调 + CRC =====
-                hdr_start = frame_sym_start + STF_LEN + PSS_LEN + RS_LEN
-                hdr_llr = _demod_llr(symbols, hdr_start, HEADER_LEN,
-                                     h, phase_est, fine_cfo, sigma2, coarse_cfo)
-                hdr_bits = (hdr_llr < 0).astype(np.int64)
+                # ===== 阶段 4: BPSK 硬判决解调 + CRC =====
+                total_cfo = coarse_cfo + fine_cfo
+                hdr_start = rp + RS_LEN
+                hdr_bits = _bpsk_demod_hard(symbols, hdr_start, HEADER_LEN,
+                                            h, total_cfo, self.Ts_sym)
                 hdr_ok = _verify_header(hdr_bits)
 
                 pay_start = hdr_start + HEADER_LEN
-                pay_llr = _demod_llr(symbols, pay_start,
-                                     PAYLOAD_LEN + PAYLOAD_CRC_LEN,
-                                     h, phase_est, fine_cfo, sigma2, coarse_cfo)
-                pay_bits = (pay_llr < 0).astype(np.int64)
+                pay_bits = _bpsk_demod_hard(symbols, pay_start,
+                                            PAYLOAD_LEN + PAYLOAD_CRC_LEN,
+                                            h, total_cfo, self.Ts_sym)
                 payload_bits = pay_bits[:PAYLOAD_LEN]
                 crc_bits = pay_bits[PAYLOAD_LEN:PAYLOAD_LEN + PAYLOAD_CRC_LEN]
                 pay_crc_ok = _verify_payload_crc(payload_bits, crc_bits)
 
-                # ===== 阶段 5: 指标 =====
-                signal_power = abs(h) ** 2
-                snr_db = float(10 * np.log10(max(signal_power / sigma2, 1e-30)))
-                total_cfo = coarse_cfo + fine_cfo
+                # ===== 阶段 5: 指标 + 打印 =====
+                hmag = abs(h)
+                snr_db = float(10 * np.log10(max(hmag ** 2 / sigma2, 1e-30)))
 
                 self.total_frames += 1
                 if hdr_ok:
@@ -468,44 +560,28 @@ class BpskPhyReceiver:
                 if pay_crc_ok:
                     self.crc_pass += 1
 
-                if self.total_frames <= 5 or self.total_frames % 50 == 0:
+                if self.total_frames <= 5 or self.total_frames % 100 == 0:
                     print(
                         f"  frame={self.total_frames:5d}  "
                         f"ptm={ptm:.1f}  pts={pts:.1f}  "
-                        f"cf0={coarse_cfo:+.0f}  cf1={fine_cfo:+.0f}  "
-                        f"Δf={total_cfo:+.0f}Hz  "
-                        f"θ={phase_est:.3f}rad  "
-                        f"|h|={abs(h):.3f}  "
-                        f"σ²={sigma2:.4f}  "
-                        f"SNR={snr_db:.1f}dB  "
+                        f"\u0394f0={coarse_cfo:+.0f}  "
+                        f"\u0394f1={fine_cfo:+.0f}  "
+                        f"|h|={hmag:.3f}  SNR={snr_db:.1f}dB  "
                         f"HDR={'OK' if hdr_ok else 'XX'}  "
                         f"CRC={'OK' if pay_crc_ok else 'XX'}",
                         flush=True)
 
-                # ===== 阶段 6: BER 统计 (按帧序号对齐, 漏帧不导致错位) =====
-                if self.tx_ref_bits is not None:
-                    frame_idx = self.total_frames - 1  # 当前帧序号 (0-based)
-                    start_idx = frame_idx * PAYLOAD_LEN
-                    end_idx = start_idx + PAYLOAD_LEN
-                    if end_idx <= len(self.tx_ref_bits):
-                        ref = self.tx_ref_bits[start_idx:end_idx]
-                        errs = int(np.sum(payload_bits != ref))
-                        self.total_bits += PAYLOAD_LEN
-                        self.total_errors += errs
-
-                # ===== 阶段 7: 消费窗口 =====
-                consume_end = frame_sample_start + FRAME_RRC_SAMPLES
+                # ===== 阶段 6: 消费窗口 =====
+                consume_end = extract_start + fs * self.sps + FRAME_RRC_SAMPLES + 50
                 if consume_end > self.buf_len:
                     consume_end = self.buf_len
                 self._consume(consume_end)
-                self._expected_frame_start = -1
                 frame_found = True
                 break
 
             if not frame_found:
-                self.false_alarms += len(candidates[:32])
+                self.false_alarms += min(8, len(peaks))
                 self._advance_window(ADVANCE_SAMPLES)
-                self._expected_frame_start = -1
 
     def _advance_window(self, n_samples: int):
         consume = min(n_samples, self.buf_len)
@@ -524,7 +600,7 @@ class BpskPhyReceiver:
         if self._expected_frame_start >= 0:
             self._expected_frame_start = max(0, self._expected_frame_start - end_idx)
 
-    def _process_window(self, tx_bits=None):
+    def _process_window(self):
         """兼容旧接口: process_samples + detect_and_demod."""
         self._detect_and_demod()
 
@@ -558,102 +634,119 @@ class BpskPhyReceiver:
     # 硬件模式
     # ================================================================
 
-    def _init_usrp(self, freq: float, gain: float,
-                   usrp_args: str = '', subdev: str = 'A:A'):
-        import uhd
-        self.usrp = uhd.usrp.MultiUSRP(usrp_args)
-        if subdev:
-            try:
-                self.usrp.set_rx_subdev_spec(subdev)
-            except Exception:
-                pass
-        actual_freq = self.usrp.set_rx_freq(uhd.types.TuneRequest(freq))
-        actual_gain = self.usrp.set_rx_gain(gain)
-        actual_rate = self.usrp.set_rx_rate(self.samp_rate)
-        actual_bw   = self.usrp.set_rx_bandwidth(self.samp_rate)
-        self.usrp.set_rx_antenna("RX2")
-        self.usrp.set_clock_source("internal")
-        self.usrp.set_time_source("internal")
-        pc_ns = time.time_ns()
-        tspec = uhd.types.TimeSpec(pc_ns // 1_000_000_000,
-                                    (pc_ns % 1_000_000_000) / 1e9)
-        self.usrp.set_time_now(tspec)
-        args = uhd.usrp.StreamArgs('fc32', 'sc16')
-        args.channels = [0]
-        self.rx_stream = self.usrp.get_rx_stream(args)
-        self.rx_stream.issue_stream_cmd(
-            uhd.types.StreamCMD(uhd.types.StreamMode.start_cont))
-        print(f"[receiver] USRP RX: freq={actual_freq:.6e}Hz  "
-              f"gain={actual_gain:.1f}dB  rate={actual_rate:.6e}  "
-              f"bw={actual_bw:.6e}  subdev={subdev}")
+    def _rx_loop_mp(self, freq, gain, usrp_args, subdev, sync_mode, settle_s):
+        """多进程零拷贝接收: 子进程recv → 共享内存 → 主进程PHY检测."""
+        serial = ''
+        if 'serial=' in usrp_args:
+            serial = usrp_args.split('serial=')[1].split(',')[0]
 
-    def _rx_loop_hardware(self):
-        import uhd
-        md = uhd.types.RXMetadata()
-        uhd_buf = np.zeros((1, 4096), dtype=np.complex64)
-        t_start = time.time()
-        print(f"[receiver] 开始硬件接收...")
+        ctx = mp.get_context('spawn')
+        shm = shared_memory.SharedMemory(create=True, size=RING_CAP * 8)
+        ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
+        ring[:] = 0j
+
+        wr_count = ctx.Value('Q', 0)
+        has_data = ctx.Event()
+        running = ctx.Value('i', 1)
+        ovf_count = ctx.Value('i', 0)
+
+        proc = ctx.Process(target=_recv_proc,
+                            args=(shm.name, serial, freq, gain, self.samp_rate,
+                                  subdev, sync_mode, settle_s,
+                                  wr_count, has_data, running, ovf_count),
+                            daemon=True)
+        proc.start()
+        print(f"[receiver] 收样 PID={proc.pid}  共享内存 {RING_CAP//1000}k 零拷贝")
+
+        self.running = True
+        rd_count = 0
+        iq_buffer = []
+        save_path = self._save_iq_path
+        ovf_last = 0
+        t0 = time.time()
+
         try:
-            while self.running:
-                ns = self.rx_stream.recv(uhd_buf, md, timeout=0.5)
-                if ns == 0:
-                    continue
-                if md.error_code == uhd.types.RXMetadataErrorCode.overflow:
-                    self.overflow_count += 1
-                    continue
+            while proc.is_alive():
+                has_data.wait(timeout=0.5)
+                has_data.clear()
+                wc = wr_count.value
+                avail = wc - rd_count
+                if avail <= 0: continue
+                if avail > RING_CAP:
+                    rd_count = wc - RING_CAP
+                    avail = RING_CAP
 
-                chunk = uhd_buf[0, :ns].copy()
-                self._process_samples(chunk)
+                rd_count += avail
 
-                if self._iq_buffer is not None:
-                    self._iq_buffer.append(chunk)
-                    if len(self._iq_buffer) >= 500:
-                        self._flush_iq()
+                # 分小块喂给 _process_samples (内部缓冲只有 1M, 大块会溢出)
+                # 快速检幅: max < amp_thr 的纯噪声跳过, 不拷贝不处理
+                CHUNK = 8192
+                amp_thr = 0.002  # 远低于最弱可用信号, 仅滤纯底噪
+                while avail > 0:
+                    take = min(avail, CHUNK)
+                    pos2 = (rd_count - avail) % RING_CAP
+                    end2 = (pos2 + take) % RING_CAP
+                    sign = False
+                    if end2 > pos2:
+                        sign = bool(np.any(np.abs(ring[pos2:pos2 + take]) > amp_thr))
+                    else:
+                        sign = (bool(np.any(np.abs(ring[pos2:]) > amp_thr)) or
+                                bool(np.any(np.abs(ring[:end2]) > amp_thr)))
+                    if sign:
+                        if end2 > pos2:
+                            c = ring[pos2:pos2 + take].copy()
+                        else:
+                            c = ring[pos2:].copy()
+                            if end2 > 0:
+                                c = np.concatenate([c, ring[:end2]])
+                        self._process_samples(c)
+                    avail -= take
+
+                if ovf_count.value != ovf_last:
+                    print(f"\n  overflow={ovf_count.value}", flush=True)
+                    ovf_last = ovf_count.value
+
+                if save_path:
+                    iq_buffer.append(chunk)
+                    if len(iq_buffer) >= 500:
+                        self._flush_iq_buf(iq_buffer, save_path)
+                        iq_buffer = []
 
         except KeyboardInterrupt:
             pass
         finally:
-            self._flush_iq()
-            elapsed = time.time() - t_start
-            self._print_summary(elapsed)
-            if hasattr(self, 'rx_stream') and self.rx_stream is not None:
-                try:
-                    self.rx_stream.issue_stream_cmd(
-                        uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
-                except Exception:
-                    pass
-            self.usrp = None
-            self.rx_stream = None
+            self.running = False
+            running.value = 0
+            proc.join(timeout=2)
+            if proc.is_alive():
+                proc.terminate()
+            if iq_buffer and save_path:
+                self._flush_iq_buf(iq_buffer, save_path)
+            self.overflow_count = ovf_count.value
+            shm.close()
+            shm.unlink()
+            self._print_summary(time.time() - t0)
 
-    def _flush_iq(self):
-        if self._iq_buffer and len(self._iq_buffer) > 0:
-            data = np.concatenate(self._iq_buffer)
-            mode = 'ab' if os.path.isfile(self._save_iq_path) else 'wb'
-            with open(self._save_iq_path, mode) as f:
+    def _flush_iq_buf(self, buf_list, path):
+        if buf_list:
+            data = np.concatenate(buf_list)
+            mode = 'ab' if os.path.isfile(path) else 'wb'
+            with open(path, mode) as f:
                 np.save(f, data)
-            print(f"[save_iq] 已保存 {len(data)} 样本", flush=True)
-            self._iq_buffer = []
+            print(f"[save_iq] {len(data)} 样本", flush=True)
 
     # ================================================================
     # 统计输出
     # ================================================================
 
     def _print_summary(self, elapsed: float):
-        print(f"\n{'='*60}")
-        print(f"接收完成")
-        print(f"  耗时: {elapsed:.1f}s")
-        print(f"  检测尝试: {self.detection_attempts}")
-        print(f"  检出帧数: {self.total_frames}")
-        print(f"  Header CRC OK: {self.header_crc_pass}")
-        print(f"  Payload CRC OK: {self.crc_pass}")
-        print(f"  误检(虚假告警): {self.false_alarms}")
-        print(f"  Overflow: {self.overflow_count}")
-        if self.total_frames > 0:
-            print(f"  CRC通过率: {self.crc_pass / self.total_frames * 100:.1f}%")
-        if self.total_bits > 0:
-            ber = self.total_errors / self.total_bits
-            print(f"  BER={self.total_errors}/{self.total_bits}={ber:.2e}")
-        print(f"{'='*60}")
+        print(f"\n--- 结果 ---")
+        print(f"  frames={self.total_frames}  "
+              f"CRC={self.crc_pass}/{self.total_frames} "
+              f"({self.crc_pass/max(self.total_frames,1)*100:.1f}%)  "
+              f"HDR={self.header_crc_pass}  "
+              f"false_alarms={self.false_alarms}",
+              flush=True)
 
     def get_stats(self) -> dict:
         """获取当前统计摘要."""
@@ -665,8 +758,6 @@ class BpskPhyReceiver:
             'overflow': self.overflow_count,
             'detection_attempts': self.detection_attempts,
             'crc_rate': self.crc_pass / max(self.total_frames, 1),
-            'total_bits': self.total_bits,
-            'total_errors': self.total_errors,
         }
 
 
@@ -678,22 +769,39 @@ def main():
     p = argparse.ArgumentParser(description='BPSK PHY 接收端')
     p.add_argument('--mode', default='sim', choices=['hardware', 'sim'])
     p.add_argument('--freq', type=float, default=915e6)
-    p.add_argument('--gain', type=float, default=30)
+    p.add_argument('--gain', type=float, default=20, help='B210: 0.0~76.0dB PGA')
     p.add_argument('--rate', type=float, default=1e6)
+    p.add_argument('--sps', type=int, default=SPS)
     p.add_argument('--sim-file', default='rx_iq.npy')
-    p.add_argument('--tx-bits', default='', help='参考发送比特 (.npy)')
     p.add_argument('--snr-db', type=float, default=15.0)
     p.add_argument('--usrp-args', default='')
     p.add_argument('--subdev', default='A:A', help='子设备 (A:A=TX/RX, A:B=RX2)')
     p.add_argument('--save-iq', default='', help='保存原始 IQ')
+    p.add_argument('--sync-mode', default='host', choices=['host', 'external_ref'],
+                   help='时钟同步模式')
+    p.add_argument('--settle', type=float, default=1.0, help='外部参考锁定时长 (s)')
+    p.add_argument('--stf-threshold', type=float, default=STF_THRESHOLD,
+                   help='STF 包检测门限')
+    p.add_argument('--pss-ptm', type=float, default=PSS_PEAK_TO_MEAN_THR,
+                   help='PSS 峰均比门限')
+    p.add_argument('--pss-pts', type=float, default=PSS_PEAK_TO_SECOND_THR,
+                   help='PSS 峰次比门限')
+    p.add_argument('--rs-corr-thr', type=float, default=0.3,
+                   help='RS 相关门限 (相对值)')
     args = p.parse_args()
 
-    rx = BpskPhyReceiver(samp_rate=args.rate)
+    rx = BpskPhyReceiver(samp_rate=args.rate, sps=args.sps,
+                         stf_threshold=args.stf_threshold,
+                         pss_ptm=args.pss_ptm,
+                         pss_pts=args.pss_pts,
+                         rs_corr_thr=args.rs_corr_thr)
     rx.start(mode=args.mode, freq=args.freq, gain=args.gain,
-             sim_file=args.sim_file, tx_bits_file=args.tx_bits,
+             sim_file=args.sim_file,
              snr_db=args.snr_db, usrp_args=args.usrp_args,
-             subdev=args.subdev, save_iq=args.save_iq)
+             subdev=args.subdev, save_iq=args.save_iq,
+             sync_mode=args.sync_mode, settle_s=args.settle)
 
 
 if __name__ == '__main__':
+    mp.freeze_support()
     main()

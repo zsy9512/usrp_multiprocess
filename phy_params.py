@@ -64,7 +64,7 @@ INFO_BITS = 128
 STF_THRESHOLD = 0.4
 
 # STF 最小能量门限 (样本域, 避免 Guard 区虚假峰)
-STF_MIN_ENERGY = 0.1 * STF_DELAY
+STF_MIN_ENERGY = 0.02 * STF_DELAY  # 0.64, 适配较宽信号动态范围 (原 3.2 过于严格)
 
 # PSS 峰值质量门限
 PSS_PEAK_TO_MEAN_THR = 4.0
