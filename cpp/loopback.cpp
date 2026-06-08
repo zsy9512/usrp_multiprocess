@@ -111,134 +111,7 @@ static StfClusterResult stf_cluster_wrap(const StfResult& stf,
     return stf_cluster_peaks(stf, samples, samp_rate);
 }
 
-// ---- RS estimate (combined coarse+fine CFO, channel, noise) ----
-struct ChanEst {
-    C64 h = C64(1,0);
-    float phase_est = 0, sigma2 = 0.1f;
-    float coarse_cfo = 0, fine_cfo = 0, total_cfo = 0;
-    float rs_corr = 0;
-    bool valid = false;
-};
-
-static ChanEst rs_estimate_local(const std::vector<C64>& syms, int rs_pos,
-                                  float coarse_cfo, float samp_rate) {
-    ChanEst c;
-    if (rs_pos + RS_LEN > (int)syms.size()) return c;
-
-    // Coarse CFO pre-compensation
-    std::vector<C64> rs_seg(RS_LEN);
-    for (int i = 0; i < RS_LEN; i++) {
-        rs_seg[i] = syms[rs_pos + i];
-        if (std::abs(coarse_cfo) > 1.0f) {
-            float phase = -2.0f * (float)M_PI * coarse_cfo * (rs_pos + i) * g_ts_sym;
-            rs_seg[i] *= C64(std::cos(phase), std::sin(phase));
-        }
-    }
-
-    // Fine CFO via linear phase fitting
-    float phases[RS_LEN];
-    float prev = 0, accum = 0;
-    for (int i = 0; i < RS_LEN; i++) {
-        float raw = std::arg(rs_seg[i] * std::conj(REF_RS[i]));
-        float diff = raw - prev;
-        if (diff > (float)M_PI) accum -= 2.0f*(float)M_PI;
-        else if (diff < -(float)M_PI) accum += 2.0f*(float)M_PI;
-        phases[i] = raw + accum;
-        prev = raw;
-    }
-    float nMean = (RS_LEN-1)/2.0f, pMean = 0;
-    for (int i = 0; i < RS_LEN; i++) pMean += phases[i];
-    pMean /= RS_LEN;
-    float num = 0, den = 0;
-    for (int i = 0; i < RS_LEN; i++) {
-        float dn = i - nMean;
-        num += dn * (phases[i] - pMean);
-        den += dn * dn;
-    }
-    c.fine_cfo = (num / (den + 1e-30f)) / (2.0f*(float)M_PI*g_ts_sym);
-    if (std::abs(c.fine_cfo) > 500.0f) return c;
-
-    // Total CFO compensation + channel estimate
-    float totalCfo = coarse_cfo + c.fine_cfo;
-    C64 sum(0,0);
-    for (int i = 0; i < RS_LEN; i++) {
-        float phase = -2.0f*(float)M_PI*totalCfo*(rs_pos + i)*g_ts_sym;
-        C64 corrected = syms[rs_pos + i] * C64(std::cos(phase), std::sin(phase));
-        sum += corrected * std::conj(REF_RS[i]);
-    }
-    c.h = sum / (float)RS_LEN;
-    if (std::abs(c.h) < 1e-6f) return c;
-
-    c.phase_est = std::arg(c.h);
-    c.total_cfo = totalCfo;
-    c.coarse_cfo = coarse_cfo;
-
-    // RS correlation quality
-    C64 corrSum(0,0);
-    for (int i = 0; i < RS_LEN; i++) {
-        float phase = -2.0f*(float)M_PI*totalCfo*(rs_pos + i)*g_ts_sym;
-        C64 corrected = syms[rs_pos + i] * C64(std::cos(phase), std::sin(phase));
-        corrSum += corrected * std::conj(REF_RS[i]);
-    }
-    c.rs_corr = std::abs(corrSum);
-    if (c.rs_corr < RS_LEN * 0.3f) return c;
-
-    // Noise variance (Welch corrected)
-    float noiseSum = 0;
-    for (int i = 0; i < RS_LEN; i++) {
-        float phase = -2.0f*(float)M_PI*totalCfo*(rs_pos + i)*g_ts_sym;
-        C64 corrected = syms[rs_pos + i] * C64(std::cos(phase), std::sin(phase));
-        C64 eq = corrected / c.h;
-        C64 err = eq - REF_RS[i];
-        noiseSum += std::norm(err);
-    }
-    c.sigma2 = noiseSum / (RS_LEN - 1);
-    if (c.sigma2 < 1e-30f) c.sigma2 = 1e-30f;
-    c.valid = true;
-    return c;
-}
-
-// ---- BPSK hard decision ----
-static std::vector<int> bpsk_demod_local(const std::vector<C64>& syms,
-                                          int data_start, int data_len,
-                                          C64 h, float total_cfo) {
-    std::vector<int> bits(data_len, 0);
-    if (data_start + data_len > (int)syms.size()) return bits;
-    for (int i = 0; i < data_len; i++) {
-        float phase = -2.0f*(float)M_PI*total_cfo*(data_start + i)*g_ts_sym;
-        C64 corrected = syms[data_start + i] * C64(std::cos(phase), std::sin(phase));
-        if (std::abs(h) > 1e-30f) corrected /= h;
-        bits[i] = (corrected.real() < 0.0f) ? 1 : 0;
-    }
-    return bits;
-}
-
-// ---- B2I ----
-static uint16_t b2i(const std::vector<int>& b, int len) {
-    uint16_t v = 0;
-    for (int i = 0; i < len; i++) v = (uint16_t)((v << 1) | (b[i] & 1));
-    return v;
-}
-
-// ---- Header verify ----
-static bool verify_header_local(const std::vector<int>& hdr) {
-    if ((int)hdr.size() < HEADER_LEN) return false;
-    uint8_t idBytes[2] = {};
-    for (int i = 0; i < 16; i++)
-        idBytes[i/8] = (uint8_t)((idBytes[i/8] << 1) | (hdr[i] & 1));
-    uint16_t expected = b2i(std::vector<int>(hdr.begin()+16, hdr.begin()+32), 16);
-    return crc16(idBytes, 2) == expected;
-}
-
-// ---- Payload CRC verify ----
-static bool verify_payload_local(const std::vector<int>& payload,
-                                  const std::vector<int>& crc_bits) {
-    uint8_t payloadBytes[PAYLOAD_LEN/8] = {};
-    for (int i = 0; i < PAYLOAD_LEN; i++)
-        payloadBytes[i/8] = (uint8_t)((payloadBytes[i/8] << 1) | (payload[i] & 1));
-    uint16_t expected = b2i(crc_bits, CRC_LEN);
-    return crc16(payloadBytes, PAYLOAD_LEN/8) == expected;
-}
+// ---- RS estimate: use phy_dsp.h ----
 
 // ===================================================================
 // Processing loop (main thread)
@@ -326,36 +199,43 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 if (rp + RS_LEN + HEADER_LEN + PAYLOAD_LEN + CRC_LEN > (int)syms.size())
                     continue;
 
-                // RS estimate
-                auto chan = rs_estimate_local(syms, rp, coarse_cfo, samp_rate);
-                if (!chan.valid) continue;
-                float sigma2 = (std::min)(chan.sigma2, 0.5f);
+                // RS estimate (use phy_dsp.h)
+                float rsCorr = 0.0f;
+                float fineCfo = rs_fine_cfo(syms, rp, coarse_cfo, REF_RS, rsCorr);
+                if (rsCorr < g_rs_corr_thr) continue;
+                if (std::abs(fineCfo) > g_fine_cfo_max) continue;
 
-                // Demod Header
+                C64 h; float phaseEst, sigma2;
+                if (!rs_channel_estimate(syms, rp, fineCfo, coarse_cfo, REF_RS, h, phaseEst, sigma2))
+                    continue;
+                sigma2 = (std::min)(sigma2, g_sigma2_max);
+                float totalCfo = coarse_cfo + fineCfo;
+
+                // Demod
                 int hdrStart = rp + RS_LEN;
-                auto hdrBits = bpsk_demod_local(syms, hdrStart, HEADER_LEN, chan.h, chan.total_cfo);
-                bool hdrOk = verify_header_local(hdrBits);
+                auto hdrBits = demod_bpsk_hard(syms, hdrStart, HEADER_LEN, h, totalCfo);
+                bool hdrOk = verify_header(hdrBits);
 
-                // Demod Payload + CRC
                 int payStart = hdrStart + HEADER_LEN;
-                auto payBits = bpsk_demod_local(syms, payStart, PAYLOAD_LEN + CRC_LEN, chan.h, chan.total_cfo);
+                auto payBits = demod_bpsk_hard(syms, payStart, PAYLOAD_LEN + CRC_LEN, h, totalCfo);
                 std::vector<int> payloadBits(payBits.begin(), payBits.begin() + PAYLOAD_LEN);
                 std::vector<int> crcBits(payBits.begin() + PAYLOAD_LEN, payBits.begin() + PAYLOAD_LEN + CRC_LEN);
-                bool payCrcOk = verify_payload_local(payloadBits, crcBits);
+                bool payCrcOk = verify_payload_crc(payloadBits, crcBits);
 
                 // Stats
                 g_stats.total++;
                 if (hdrOk) g_stats.hdr_ok++;
                 if (payCrcOk) g_stats.crc_ok++;
 
-                uint16_t fid = b2i(std::vector<int>(hdrBits.begin(), hdrBits.begin()+16), 16);
+                uint16_t fid = 0;
+                for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
                 {
                     std::lock_guard<std::mutex> lk(g_result_mtx);
                     g_results.push_back({(int)fid, es + fs * SPS,
                                          std::vector<int>(payloadBits)});
                 }
 
-                float hmag = std::abs(chan.h);
+                float hmag = std::abs(h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
