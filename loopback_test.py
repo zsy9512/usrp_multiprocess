@@ -31,9 +31,11 @@ FRAME_RRC_SAMPLES = 496 * SPS + len(RRC) - 1  # 1012 samples
 # 子进程: PHY 处理 (从共享内存读, 随便多慢都不影响 USRP)
 # ===================================================================
 
-def _proc_worker(shm_name, wr_count, has_data, running, num_frames, result_path):
+def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_name):
     shm = shared_memory.SharedMemory(name=shm_name)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
+    tx_ts_shm = shared_memory.SharedMemory(name=tx_ts_shm_name) if tx_ts_shm_name else None
+    tx_ts = np.ndarray(num_frames, dtype=np.uint64, buffer=tx_ts_shm.buf) if tx_ts_shm else None
 
     # ------------------------------------------------------------------
     # ① STF 延迟相关 + 粗 CFO + 峰值聚类
@@ -173,7 +175,6 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, result_path)
     buf = np.zeros(1_000_000, dtype=np.complex64); buf_len = 0
     rd = 0; total = 0; hdr_ok_cnt = 0; crc_ok_cnt = 0
     false_alarms = 0
-    results = []  # (frame_id, global_pos, payload_bits)
 
     while running.value:
         has_data.wait(timeout=0.5); has_data.clear()
@@ -252,18 +253,20 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, result_path)
                     if hdr_ok: hdr_ok_cnt += 1
                     if crc_ok: crc_ok_cnt += 1
 
-                    fid = _b2i(hdr[:16])
-                    results.append((fid, es + fs * SPS, payload_bits.copy()))
-
                     if total <= 5 or total % 100 == 0:
                         hmag = abs(chan['h'])
                         snr = 10 * np.log10(max(hmag ** 2 / sigma2_clip, 1e-30))
+                        fid = _b2i(hdr[:16])
+                        lat_us = -1
+                        if tx_ts is not None and fid < len(tx_ts) and tx_ts[fid] > 0:
+                            lat_us = int((time.time_ns() - tx_ts[fid]) / 1000)
                         print(
                             f"  frame={total:5d}  "
                             f"ptm={ptm:.1f}  pts={pts:.1f}  "
                             f"\u0394f0={chan['coarse_cfo']:+.0f}  "
                             f"\u0394f1={chan['fine_cfo']:+.0f}  "
                             f"|h|={hmag:.3f}  SNR={snr:.1f}dB  "
+                            f"lat={lat_us}us  "
                             f"HDR={'OK' if hdr_ok else 'XX'}  "
                             f"CRC={'OK' if crc_ok else 'XX'}",
                             flush=True)
@@ -287,9 +290,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, result_path)
           f"({crc_ok_cnt/max(total,1)*100:.1f}%)  "
           f"HDR={hdr_ok_cnt}  false_alarms={false_alarms}",
           flush=True)
-    if results:
-        np.save(result_path, np.array(results, dtype=object), allow_pickle=True)
     shm.close()
+    if tx_ts_shm: tx_ts_shm.close()
 
 
 # ===================================================================
@@ -349,9 +351,13 @@ def main():
     wr_count = ctx.Value('Q', 0); has_data = ctx.Event()
     running = ctx.Value('i', 1)
 
+    tx_ts_shm = shared_memory.SharedMemory(create=True, size=args.num_frames * 8)
+    tx_ts = np.ndarray(args.num_frames, dtype=np.uint64, buffer=tx_ts_shm.buf)
+    tx_ts[:] = 0
+
     proc = ctx.Process(target=_proc_worker,
                        args=(shm.name, wr_count, has_data, running, args.num_frames,
-                             'loopback_results.npy'),
+                             tx_ts_shm.name),
                        daemon=True)
     proc.start()
     print(f"[loopback] 处理子进程 PID={proc.pid}")
@@ -376,14 +382,13 @@ def main():
     # ── TX 线程 ──
     gap = max(16, int(args.frame_gap_ms * SAMP_RATE / 1000))
     tx_done = threading.Event()
-    tx_bits = [None] * args.num_frames  # 按 frame_id 索引
 
     def tx_thread():
         from sender import build_frame, rrc_filter
         md = uhd.types.TXMetadata(); md.start_of_burst = True
         for f in range(args.num_frames):
+            tx_ts[f] = time.time_ns()
             raw = np.random.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
-            tx_bits[f] = raw
             iq = rrc_filter(build_frame(raw, f), RRC, SPS)
             tx.send(iq.astype(np.complex64), md); md.start_of_burst = False
             if gap > 0:
@@ -403,25 +408,8 @@ def main():
     time.sleep(3)
     running.value = 0; proc.join(timeout=5)
     if proc.is_alive(): proc.terminate()
-
-    # ── 离线 BER ──
-    result_file = 'loopback_results.npy'
-    try:
-        results = np.load(result_file, allow_pickle=True)
-        errs = 0; total_bits = 0
-        for fid, _, payload in results:
-            fid = int(fid)
-            if fid < len(tx_bits) and tx_bits[fid] is not None:
-                ref = tx_bits[fid]
-                errs += int(np.sum(payload.astype(np.int64) != ref.astype(np.int64)))
-                total_bits += PAYLOAD_LEN
-        if total_bits > 0:
-            ber = errs / total_bits
-            print(f"  BER={ber*100:.2f}%  ({errs}/{total_bits})")
-    except Exception:
-        pass
-
     shm.close(); shm.unlink()
+    tx_ts_shm.close(); tx_ts_shm.unlink()
 
 
 if __name__ == '__main__':
