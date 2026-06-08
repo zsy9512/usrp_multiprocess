@@ -64,19 +64,10 @@ struct PhyStats {
 static PhyStats g_stats;
 static std::mutex g_print_mtx;
 
-static void print_frame(int total, int hdr_ok, int crc_ok,
-                        float ptm, float pts,
-                        float coarse_cfo, float fine_cfo,
-                        float hmag, float snr_db,
-                        bool hdrOk, bool payCrcOk) {
+static void print_frame(int total, float snr_db, bool hdrOk, bool payCrcOk) {
     std::lock_guard<std::mutex> lk(g_print_mtx);
-    fprintf(stderr,
-        "  frame=%5d  ptm=%.1f  pts=%.1f  "
-        "\xce\x94\x66\x30=%+.0f  \xce\x94\x66\x31=%+.0f  "
-        "|h|=%.3f  SNR=%.1fdB  HDR=%s  CRC=%s\n",
-        total, ptm, pts,
-        coarse_cfo, fine_cfo,
-        hmag, snr_db,
+    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  HDR=%s  CRC=%s\n",
+        total, snr_db,
         hdrOk ? "OK" : "XX", payCrcOk ? "OK" : "XX");
     fflush(stderr);
 }
@@ -352,10 +343,7 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    print_frame(g_stats.total, g_stats.hdr_ok, g_stats.crc_ok,
-                               pssRes.peak_to_mean, pssRes.peak_to_second,
-                               chan.coarse_cfo, chan.fine_cfo,
-                               hmag, snrDb, hdrOk, payCrcOk);
+                    print_frame(g_stats.total, snrDb, hdrOk, payCrcOk);
                 }
 
                 // Consume window
@@ -384,9 +372,6 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
 // ===================================================================
 // Threads
 // ===================================================================
-static volatile bool g_running = true;
-
-static void sigint_handler(int) { g_running = false; }
 
 static void rx_thread_func(uhd::rx_streamer::sptr rx_stream,
                            SharedRing& ring,
@@ -450,7 +435,6 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
 // ===================================================================
 int main(int argc, char* argv[]) {
     init_crc16_table();
-    signal(SIGINT, sigint_handler);
 
     double freq = 915e6, tx_gain = 65.0, rx_gain = 64.0;
     double rate = 1e6, frame_gap_ms = 5.0;
@@ -520,19 +504,20 @@ int main(int argc, char* argv[]) {
 
     int gap_len = std::max(16, (int)(frame_gap_ms * rate / 1000.0));
     std::thread tx_th(tx_thread_func, tx_stream, num_frames, gap_len, std::ref(running));
+    std::thread proc_th(process_loop, std::ref(ring), std::ref(running), (float)rate);
 
-    printf("[loopback] TX thread started, %d frames  gap=%.1fms\n", num_frames, frame_gap_ms);
-    printf("[loopback] PSS thr=(ptm=%.1f,pts=%.1f)  RS_corr>0.3\n",
-           g_pss_ptm_thr, g_pss_pts_thr);
+    printf("[loopback] TX started, %d frames  gap=%.1fms  "
+           "PSS thr=(ptm=%.1f,pts=%.1f)\n",
+           num_frames, frame_gap_ms, g_pss_ptm_thr, g_pss_pts_thr);
 
-    // --- Processing (main thread) ---
-    process_loop(ring, running, (float)rate);
-
-    // --- Wait for TX to finish ---
+    // --- Wait for TX, then drain buffer ---
     tx_th.join();
+    printf("[loopback] TX done, draining...\n");
     std::this_thread::sleep_for(std::chrono::seconds(3));
     running.store(false);
+
     rx_th.join();
+    proc_th.join();
 
     // --- Report ---
     int total = g_stats.total;
