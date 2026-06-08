@@ -227,10 +227,6 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 std::vector<int> crcBits(payBits.begin() + PAYLOAD_LEN, payBits.begin() + PAYLOAD_LEN + CRC_LEN);
                 bool payCrcOk = verify_payload_crc(payloadBits, crcBits);
 
-                // Frame sample start (correct for RRC matched-filter delay)
-                int frameSampleStart = es + fs * SPS - RRC_DELAY;
-                if (frameSampleStart < 0) continue;
-
                 // Stats
                 g_stats.total++;
                 if (hdrOk) g_stats.hdr_ok++;
@@ -245,10 +241,11 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                     for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
                     {
                         std::lock_guard<std::mutex> lk(g_result_mtx);
-                        g_results.push_back({(int)fid, frameSampleStart,
+                        g_results.push_back({(int)fid, es + fs * SPS,
                                              std::vector<int>(payloadBits)});
                     }
-                    if (fid < g_tx_ts.size()) {
+                    if (fid < g_tx_ts.size()
+                        && g_tx_ts[fid].time_since_epoch().count() > 0) {
                         auto now = std::chrono::steady_clock::now();
                         int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
                             now - g_tx_ts[fid]).count();
@@ -264,7 +261,7 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 }
 
                 // Consume window
-                int consumeEnd = frameSampleStart + FRAME_RRC_SAMPLES + 50;
+                int consumeEnd = es + fs * SPS + FRAME_RRC_SAMPLES + 50;
                 if (consumeEnd > buf_len) consumeEnd = buf_len;
                 if (consumeEnd < buf_len) {
                     int remain = buf_len - consumeEnd;
