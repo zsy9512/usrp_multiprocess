@@ -72,11 +72,12 @@ static std::mutex g_print_mtx;
 static std::mutex g_result_mtx;
 static std::vector<FrameResult> g_results;
 static std::vector<std::vector<int>> g_tx_bits;  // indexed by frame_id
+static std::vector<std::chrono::steady_clock::time_point> g_tx_ts;  // indexed by frame_id
 
-static void print_frame(int total, float snr_db, bool hdrOk, bool payCrcOk) {
+static void print_frame(int total, float snr_db, int64_t lat_us, bool hdrOk, bool payCrcOk) {
     std::lock_guard<std::mutex> lk(g_print_mtx);
-    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  HDR=%s  CRC=%s\n",
-        total, snr_db,
+    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  lat=%lldus  HDR=%s  CRC=%s\n",
+        total, snr_db, (long long)lat_us,
         hdrOk ? "OK" : "XX", payCrcOk ? "OK" : "XX");
     fflush(stderr);
 }
@@ -175,6 +176,8 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
             for (int ci = 0; ci < maxCand && !found; ci++) {
                 int d = clustered.peaks[ci];
                 float coarse_cfo = clustered.cfos[ci];
+                // Filter unrealistic CFO from noise peaks
+                if (std::abs(coarse_cfo) > 2000.0f) continue;
                 int coarse = ws + d;
 
                 // Extract window
@@ -239,7 +242,13 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    print_frame(g_stats.total, snrDb, hdrOk, payCrcOk);
+                    int64_t lat_us = -1;
+                    if (fid < g_tx_ts.size()) {
+                        auto now = std::chrono::steady_clock::now();
+                        lat_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            now - g_tx_ts[fid]).count();
+                    }
+                    print_frame(g_stats.total, snrDb, lat_us, hdrOk, payCrcOk);
                 }
 
                 // Consume window
@@ -301,11 +310,13 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
     // Use fixed seed for reproducibility
     srand(42);
     g_tx_bits.resize(num_frames);
+    g_tx_ts.resize(num_frames);
 
     for (int f = 0; f < num_frames && running.load(std::memory_order_relaxed); f++) {
         std::vector<int> bits(PAYLOAD_LEN);
         for (int i = 0; i < PAYLOAD_LEN; i++) bits[i] = rand() & 1;
         g_tx_bits[f] = bits;
+        g_tx_ts[f] = std::chrono::steady_clock::now();
 
         auto frame = build_frame(bits, (uint16_t)f);
         auto txSig = rrc_filter(frame, RRC);
