@@ -242,15 +242,16 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 float hmag = std::abs(h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
+                // accumulate latency every frame
+                if (fid < g_tx_ts.size()) {
+                    auto now = std::chrono::steady_clock::now();
+                    int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
+                        now - g_tx_ts[fid]).count();
+                    g_stats.total_lat_us += lat;
+                }
+
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    int64_t avg_lat = -1;
-                    if (fid < g_tx_ts.size()) {
-                        auto now = std::chrono::steady_clock::now();
-                        int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
-                            now - g_tx_ts[fid]).count();
-                        g_stats.total_lat_us += lat;
-                        avg_lat = g_stats.total_lat_us / g_stats.total;
-                    }
+                    int64_t avg_lat = g_stats.total_lat_us / g_stats.total;
                     print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
                 }
 

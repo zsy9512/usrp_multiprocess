@@ -263,13 +263,13 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
                         ber_errs += int(np.sum(payload_bits != ref))
                         ber_total += PAYLOAD_LEN
 
+                    # accumulate latency every frame
+                    if tx_ts is not None and fid < len(tx_ts) and tx_ts[fid] > 0:
+                        total_lat_us += int((time.time_ns() - tx_ts[fid]) / 1000)
+
                     if total <= 5 or total % 100 == 0:
                         hmag = abs(chan['h'])
                         snr = 10 * np.log10(max(hmag ** 2 / sigma2_clip, 1e-30))
-                        lat_us = -1
-                        if tx_ts is not None and fid < len(tx_ts) and tx_ts[fid] > 0:
-                            lat_us = int((time.time_ns() - tx_ts[fid]) / 1000)
-                            total_lat_us += lat_us
                         avg_lat = total_lat_us // max(total, 1)
                         print(
                             f"  frame={total:5d}  "
