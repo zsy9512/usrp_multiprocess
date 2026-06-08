@@ -35,5 +35,9 @@ echo === Compiling uhd_rx_msvc.exe ===
 cl %CFLAGS% uhd_rx_main.cpp /link %LFLAGS% /out:uhd_rx_msvc.exe
 if %ERRORLEVEL% NEQ 0 (echo uhd_rx FAILED && exit /b 1)
 
+echo === Compiling loopback_msvc.exe ===
+cl %CFLAGS% loopback.cpp /link %LFLAGS% /out:loopback_msvc.exe
+if %ERRORLEVEL% NEQ 0 (echo loopback FAILED && exit /b 1)
+
 echo === Done ===
-dir uhd_tx_msvc.exe uhd_rx_msvc.exe
+dir uhd_tx_msvc.exe uhd_rx_msvc.exe loopback_msvc.exe
