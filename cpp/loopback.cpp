@@ -60,6 +60,7 @@ struct SharedRing : public RingBuf {
 struct PhyStats {
     int total = 0, hdr_ok = 0, crc_ok = 0, false_alarms = 0;
     int64_t total_lat_us = 0;
+    int lat_count = 0;
 };
 
 struct FrameResult {
@@ -226,37 +227,44 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 std::vector<int> crcBits(payBits.begin() + PAYLOAD_LEN, payBits.begin() + PAYLOAD_LEN + CRC_LEN);
                 bool payCrcOk = verify_payload_crc(payloadBits, crcBits);
 
+                // Frame sample start (correct for RRC matched-filter delay)
+                int frameSampleStart = es + fs * SPS - RRC_DELAY;
+                if (frameSampleStart < 0) continue;
+
                 // Stats
                 g_stats.total++;
                 if (hdrOk) g_stats.hdr_ok++;
                 if (payCrcOk) g_stats.crc_ok++;
 
-                uint16_t fid = 0;
-                for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
-                {
-                    std::lock_guard<std::mutex> lk(g_result_mtx);
-                    g_results.push_back({(int)fid, es + fs * SPS,
-                                         std::vector<int>(payloadBits)});
-                }
-
                 float hmag = std::abs(h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
-                // accumulate latency every frame
-                if (fid < g_tx_ts.size()) {
-                    auto now = std::chrono::steady_clock::now();
-                    int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
-                        now - g_tx_ts[fid]).count();
-                    g_stats.total_lat_us += lat;
+                // Only process frame id / latency when header CRC is valid
+                if (hdrOk) {
+                    uint16_t fid = 0;
+                    for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
+                    {
+                        std::lock_guard<std::mutex> lk(g_result_mtx);
+                        g_results.push_back({(int)fid, frameSampleStart,
+                                             std::vector<int>(payloadBits)});
+                    }
+                    if (fid < g_tx_ts.size()) {
+                        auto now = std::chrono::steady_clock::now();
+                        int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
+                            now - g_tx_ts[fid]).count();
+                        g_stats.total_lat_us += lat;
+                        g_stats.lat_count++;
+                    }
                 }
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    int64_t avg_lat = g_stats.total_lat_us / g_stats.total;
+                    int64_t avg_lat = g_stats.lat_count > 0
+                        ? g_stats.total_lat_us / g_stats.lat_count : 0;
                     print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
                 }
 
                 // Consume window
-                int consumeEnd = es + fs * SPS + FRAME_RRC_SAMPLES + 50;
+                int consumeEnd = frameSampleStart + FRAME_RRC_SAMPLES + 50;
                 if (consumeEnd > buf_len) consumeEnd = buf_len;
                 if (consumeEnd < buf_len) {
                     int remain = buf_len - consumeEnd;
@@ -297,6 +305,9 @@ static void rx_thread_func(uhd::rx_streamer::sptr rx_stream,
             overflow_count.fetch_add(1);
             continue;
         }
+        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
+            continue;  // skip late-command / timeout / bad-packet data
+        }
         ring.write_samples(buf.data(), ns, w);
     }
 
@@ -310,6 +321,20 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
     uhd::tx_metadata_t md;
     md.start_of_burst = true;
     md.end_of_burst = false;
+
+    // Helper: send all samples, retrying on partial send
+    auto send_all = [&](const C64* data, size_t total, uhd::tx_metadata_t& meta) -> bool {
+        size_t sent = 0;
+        while (sent < total && running.load(std::memory_order_relaxed)) {
+            size_t n = tx_stream->send(data + sent, total - sent, meta, 0.5);
+            if (n == 0) {
+                fprintf(stderr, "[tx] send stalled (sent=%zu/%zu)\n", sent, total);
+                return false;
+            }
+            sent += n;
+        }
+        return sent == total;
+    };
 
     // Use fixed seed for reproducibility
     srand(42);
@@ -325,7 +350,7 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
         auto frame = build_frame(bits, (uint16_t)f);
         auto txSig = rrc_filter(frame, RRC);
 
-        tx_stream->send(txSig.data(), txSig.size(), md);
+        if (!send_all(txSig.data(), txSig.size(), md)) break;
         md.start_of_burst = false;
 
         if (gap_len > 0) {
@@ -333,14 +358,14 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
             gap_md.start_of_burst = false;
             gap_md.end_of_burst = false;
             std::vector<C64> gap(gap_len, C64(0,0));
-            tx_stream->send(gap.data(), gap.size(), gap_md);
+            send_all(gap.data(), gap.size(), gap_md);
         }
     }
 
     uhd::tx_metadata_t eob;
     eob.end_of_burst = true;
     C64 z(0,0);
-    tx_stream->send(&z, 1, eob);
+    send_all(&z, 1, eob);
 }
 
 // ===================================================================
