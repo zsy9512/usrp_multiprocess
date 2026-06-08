@@ -22,7 +22,7 @@
 // ===================================================================
 // Ring buffer extension (phy_dsp.h RingBuf + write/copy_to methods)
 // ===================================================================
-static constexpr int RING_CAP = 2'000'000;
+static constexpr int RING_CAP = 200'000;
 
 struct SharedRing : public RingBuf {
     std::atomic<size_t> wr_count{0};
@@ -120,7 +120,7 @@ static StfClusterResult stf_cluster_wrap(const StfResult& stf,
 // Processing loop (main thread)
 // ===================================================================
 static void process_loop(SharedRing& ring, std::atomic<bool>& running, float samp_rate) {
-    constexpr int BUF_CAP = 1'000'000;
+    constexpr int BUF_CAP = 200'000;
     std::vector<C64> buf(BUF_CAP);
     int buf_len = 0;
     size_t rd_count = 0;
@@ -129,7 +129,7 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
         // Check for new data
         size_t wc = ring.wr_count.load(std::memory_order_acquire);
         if (wc <= rd_count) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::yield();
             continue;
         }
         size_t avail = wc - rd_count;
