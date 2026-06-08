@@ -17,7 +17,7 @@ set UHD_LIB=C:\PROGRA~1\UHD\lib\uhd.lib
 set BOOST_ROOT=E:\PhD_work\code\usrp_hardware\boost_1_66_0\boost_1_66_0
 set BOOST_LIB=%BOOST_ROOT%\stage64s\lib
 
-set CFLAGS=/EHsc /O2 /arch:AVX2 /fp:fast /std:c++17 /I "%UHD_INC%" /I "%BOOST_ROOT%" ^
+set CFLAGS=/EHsc /O2 /fp:fast /std:c++17 /I "%UHD_INC%" /I "%BOOST_ROOT%" ^
   /DBOOST_ALL_NO_LIB /DBOOST_CONFIG_SUPPRESS_OUTDATED_MESSAGE
 
 set LFLAGS=%UHD_LIB% ws2_32.lib ^
