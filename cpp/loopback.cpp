@@ -22,7 +22,7 @@
 // ===================================================================
 // Ring buffer extension (phy_dsp.h RingBuf + write/copy_to methods)
 // ===================================================================
-static constexpr int RING_CAP = 200'000;
+static constexpr int RING_CAP = 2'000'000;
 
 struct SharedRing : public RingBuf {
     std::atomic<size_t> wr_count{0};
@@ -60,7 +60,6 @@ struct SharedRing : public RingBuf {
 struct PhyStats {
     int total = 0, hdr_ok = 0, crc_ok = 0, false_alarms = 0;
     int64_t total_lat_us = 0;
-    int lat_count = 0;
 };
 
 struct FrameResult {
@@ -84,16 +83,15 @@ static void print_frame(int total, float snr_db, int64_t avg_lat_us, bool hdrOk,
     fflush(stderr);
 }
 
-// ---- RRC matched filter (pointer-based, no copy) ----
-static std::vector<C64> rrc_match_ptr(const C64* samples, int N) {
+// ---- RRC matched filter ----
+static std::vector<C64> rrc_match_local(const std::vector<C64>& samples) {
+    int N = (int)samples.size();
     int M = (int)RRC.size();
     int convLen = N + M - 1;
     std::vector<C64> filt(convLen, C64(0,0));
     for (int i = 0; i < convLen; i++) {
         C64 sum(0,0);
-        int j0 = (std::max)(0, i - N + 1);
-        int j1 = (std::min)(M, i + 1);
-        for (int j = j0; j < j1; j++) {
+        for (int j = 0; j < M; j++) {
             int sidx = i - j;
             if (sidx >= 0 && sidx < N)
                 sum += samples[sidx] * RRC[M - 1 - j];
@@ -121,7 +119,7 @@ static StfClusterResult stf_cluster_wrap(const StfResult& stf,
 // Processing loop (main thread)
 // ===================================================================
 static void process_loop(SharedRing& ring, std::atomic<bool>& running, float samp_rate) {
-    constexpr int BUF_CAP = 200'000;
+    constexpr int BUF_CAP = 1'000'000;
     std::vector<C64> buf(BUF_CAP);
     int buf_len = 0;
     size_t rd_count = 0;
@@ -130,7 +128,7 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
         // Check for new data
         size_t wc = ring.wr_count.load(std::memory_order_acquire);
         if (wc <= rd_count) {
-            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         size_t avail = wc - rd_count;
@@ -189,7 +187,8 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 int ee = (std::min)(buf_len, coarse + EXTRACT_EXTRA + FRAME_RRC_SAMPLES + EXTRACT_EXTRA);
                 if (ee - es < PSS_LEN * SPS) continue;
 
-                auto syms = rrc_match_ptr(buf.data() + es, ee - es);
+                std::vector<C64> chunkR(buf.begin() + es, buf.begin() + ee);
+                auto syms = rrc_match_local(chunkR);
                 if ((int)syms.size() < PSS_LEN + RS_LEN) continue;
 
                 // PSS
@@ -232,31 +231,27 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 if (hdrOk) g_stats.hdr_ok++;
                 if (payCrcOk) g_stats.crc_ok++;
 
+                uint16_t fid = 0;
+                for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
+                {
+                    std::lock_guard<std::mutex> lk(g_result_mtx);
+                    g_results.push_back({(int)fid, es + fs * SPS,
+                                         std::vector<int>(payloadBits)});
+                }
+
                 float hmag = std::abs(h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
-                // Only process frame id / latency when header CRC is valid
-                if (hdrOk) {
-                    uint16_t fid = 0;
-                    for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
-                    {
-                        std::lock_guard<std::mutex> lk(g_result_mtx);
-                        g_results.push_back({(int)fid, es + fs * SPS,
-                                             std::vector<int>(payloadBits)});
-                    }
-                    if (fid < g_tx_ts.size()
-                        && g_tx_ts[fid].time_since_epoch().count() > 0) {
-                        auto now = std::chrono::steady_clock::now();
-                        int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
-                            now - g_tx_ts[fid]).count();
-                        g_stats.total_lat_us += lat;
-                        g_stats.lat_count++;
-                    }
+                // accumulate latency every frame
+                if (fid < g_tx_ts.size()) {
+                    auto now = std::chrono::steady_clock::now();
+                    int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
+                        now - g_tx_ts[fid]).count();
+                    g_stats.total_lat_us += lat;
                 }
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    int64_t avg_lat = g_stats.lat_count > 0
-                        ? g_stats.total_lat_us / g_stats.lat_count : 0;
+                    int64_t avg_lat = g_stats.total_lat_us / g_stats.total;
                     print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
                 }
 
@@ -302,9 +297,6 @@ static void rx_thread_func(uhd::rx_streamer::sptr rx_stream,
             overflow_count.fetch_add(1);
             continue;
         }
-        if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
-            continue;  // skip late-command / timeout / bad-packet data
-        }
         ring.write_samples(buf.data(), ns, w);
     }
 
@@ -318,20 +310,6 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
     uhd::tx_metadata_t md;
     md.start_of_burst = true;
     md.end_of_burst = false;
-
-    // Helper: send all samples, retrying on partial send
-    auto send_all = [&](const C64* data, size_t total, uhd::tx_metadata_t& meta) -> bool {
-        size_t sent = 0;
-        while (sent < total && running.load(std::memory_order_relaxed)) {
-            size_t n = tx_stream->send(data + sent, total - sent, meta, 0.5);
-            if (n == 0) {
-                fprintf(stderr, "[tx] send stalled (sent=%zu/%zu)\n", sent, total);
-                return false;
-            }
-            sent += n;
-        }
-        return sent == total;
-    };
 
     // Use fixed seed for reproducibility
     srand(42);
@@ -347,7 +325,7 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
         auto frame = build_frame(bits, (uint16_t)f);
         auto txSig = rrc_filter(frame, RRC);
 
-        if (!send_all(txSig.data(), txSig.size(), md)) break;
+        tx_stream->send(txSig.data(), txSig.size(), md);
         md.start_of_burst = false;
 
         if (gap_len > 0) {
@@ -355,14 +333,14 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
             gap_md.start_of_burst = false;
             gap_md.end_of_burst = false;
             std::vector<C64> gap(gap_len, C64(0,0));
-            send_all(gap.data(), gap.size(), gap_md);
+            tx_stream->send(gap.data(), gap.size(), gap_md);
         }
     }
 
     uhd::tx_metadata_t eob;
     eob.end_of_burst = true;
     C64 z(0,0);
-    send_all(&z, 1, eob);
+    tx_stream->send(&z, 1, eob);
 }
 
 // ===================================================================
