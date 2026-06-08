@@ -9,7 +9,7 @@ REM                     --with-system --with-date_time --with-thread --with-prog
 REM
 REM 用法: 在 cpp 目录下运行此脚本
 
-call "C:'\Program Files (x86)\'Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 if %ERRORLEVEL% NEQ 0 (echo vcvars64.bat failed && exit /b 1)
 
 set UHD_INC=C:\PROGRA~1\UHD\include

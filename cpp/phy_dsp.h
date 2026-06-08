@@ -304,13 +304,15 @@ inline float compute_coarse_cfo(C64 P_peak, float samp_rate) {
 }
 
 // ===================================================================
-// 7b. STF 峰值聚类去重 (对齐 loopback_test 128-sample 窗)
+// 7b. STF peak clustering (128-sample window dedup)
 // ===================================================================
 
 struct StfClusterResult {
-    std::vector<int> peaks;      // 聚类后的峰值位置
-    std::vector<float> cfos;     // 对应的粗 CFO
+    std::vector<int> peaks;
+    std::vector<float> cfos;
 };
+
+struct RawPeak { int d; float metric; C64 P; };
 
 inline StfClusterResult stf_cluster_peaks(const StfResult& stf,
                                            const std::vector<C64>& samples,
@@ -319,8 +321,6 @@ inline StfClusterResult stf_cluster_peaks(const StfResult& stf,
     int L = STF_DELAY;
     int N = (int)samples.size();
 
-    // 收集满足门限 + 能量的原始候选
-    struct RawPeak { int d; float metric; C64 P; };
     std::vector<RawPeak> raw;
     for (int d = 0; d < (int)stf.metric.size(); d++) {
         if (stf.metric[d] > g_stf_threshold) {
@@ -335,15 +335,14 @@ inline StfClusterResult stf_cluster_peaks(const StfResult& stf,
     }
     if (raw.empty()) return res;
 
-    // 按 M 排序, 128-sample 窗内去重保留最强
     std::sort(raw.begin(), raw.end(),
               [](const RawPeak& a, const RawPeak& b) { return a.metric > b.metric; });
 
     std::vector<bool> used(stf.metric.size(), false);
     for (const auto& rp : raw) {
         if (used[rp.d]) continue;
-        int start = std::max(0, rp.d - 128);
-        int end = std::min((int)stf.metric.size(), rp.d + 128);
+        int start = (std::max)(0, rp.d - 128);
+        int end = (std::min)((int)stf.metric.size(), rp.d + 128);
         for (int i = start; i < end; i++) used[i] = true;
         res.peaks.push_back(rp.d);
         float phase = std::arg(rp.P);
