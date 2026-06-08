@@ -59,6 +59,7 @@ struct SharedRing : public RingBuf {
 // ===================================================================
 struct PhyStats {
     int total = 0, hdr_ok = 0, crc_ok = 0, false_alarms = 0;
+    int64_t total_lat_us = 0;
 };
 
 struct FrameResult {
@@ -74,10 +75,10 @@ static std::vector<FrameResult> g_results;
 static std::vector<std::vector<int>> g_tx_bits;  // indexed by frame_id
 static std::vector<std::chrono::steady_clock::time_point> g_tx_ts;  // indexed by frame_id
 
-static void print_frame(int total, float snr_db, int64_t lat_us, bool hdrOk, bool payCrcOk) {
+static void print_frame(int total, float snr_db, int64_t avg_lat_us, bool hdrOk, bool payCrcOk) {
     std::lock_guard<std::mutex> lk(g_print_mtx);
-    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  lat=%lldus  HDR=%s  CRC=%s\n",
-        total, snr_db, (long long)lat_us,
+    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  avglat=%lldus  HDR=%s  CRC=%s\n",
+        total, snr_db, (long long)avg_lat_us,
         hdrOk ? "OK" : "XX", payCrcOk ? "OK" : "XX");
     fflush(stderr);
 }
@@ -242,13 +243,15 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    int64_t lat_us = -1;
+                    int64_t avg_lat = -1;
                     if (fid < g_tx_ts.size()) {
                         auto now = std::chrono::steady_clock::now();
-                        lat_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
                             now - g_tx_ts[fid]).count();
+                        g_stats.total_lat_us += lat;
+                        avg_lat = g_stats.total_lat_us / g_stats.total;
                     }
-                    print_frame(g_stats.total, snrDb, lat_us, hdrOk, payCrcOk);
+                    print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
                 }
 
                 // Consume window

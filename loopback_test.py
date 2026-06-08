@@ -178,6 +178,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
     rd = 0; total = 0; hdr_ok_cnt = 0; crc_ok_cnt = 0
     false_alarms = 0
     ber_errs = 0; ber_total = 0
+    total_lat_us = 0
 
     while running.value:
         has_data.wait(timeout=0.5); has_data.clear()
@@ -268,13 +269,15 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
                         lat_us = -1
                         if tx_ts is not None and fid < len(tx_ts) and tx_ts[fid] > 0:
                             lat_us = int((time.time_ns() - tx_ts[fid]) / 1000)
+                            total_lat_us += lat_us
+                        avg_lat = total_lat_us // max(total, 1)
                         print(
                             f"  frame={total:5d}  "
                             f"ptm={ptm:.1f}  pts={pts:.1f}  "
                             f"\u0394f0={chan['coarse_cfo']:+.0f}  "
                             f"\u0394f1={chan['fine_cfo']:+.0f}  "
                             f"|h|={hmag:.3f}  SNR={snr:.1f}dB  "
-                            f"lat={lat_us}us  "
+                            f"avglat={avg_lat}us  "
                             f"HDR={'OK' if hdr_ok else 'XX'}  "
                             f"CRC={'OK' if crc_ok else 'XX'}",
                             flush=True)
