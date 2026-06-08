@@ -31,11 +31,13 @@ FRAME_RRC_SAMPLES = 496 * SPS + len(RRC) - 1  # 1012 samples
 # 子进程: PHY 处理 (从共享内存读, 随便多慢都不影响 USRP)
 # ===================================================================
 
-def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_name):
+def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_name, tx_bits_shm_name):
     shm = shared_memory.SharedMemory(name=shm_name)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
     tx_ts_shm = shared_memory.SharedMemory(name=tx_ts_shm_name) if tx_ts_shm_name else None
     tx_ts = np.ndarray(num_frames, dtype=np.uint64, buffer=tx_ts_shm.buf) if tx_ts_shm else None
+    tx_bits_shm = shared_memory.SharedMemory(name=tx_bits_shm_name) if tx_bits_shm_name else None
+    tx_bits = np.ndarray((num_frames, PAYLOAD_LEN), dtype=np.int8, buffer=tx_bits_shm.buf) if tx_bits_shm else None
 
     # ------------------------------------------------------------------
     # ① STF 延迟相关 + 粗 CFO + 峰值聚类
@@ -175,6 +177,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
     buf = np.zeros(1_000_000, dtype=np.complex64); buf_len = 0
     rd = 0; total = 0; hdr_ok_cnt = 0; crc_ok_cnt = 0
     false_alarms = 0
+    ber_errs = 0; ber_total = 0
 
     while running.value:
         has_data.wait(timeout=0.5); has_data.clear()
@@ -253,10 +256,15 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
                     if hdr_ok: hdr_ok_cnt += 1
                     if crc_ok: crc_ok_cnt += 1
 
+                    fid = _b2i(hdr[:16])
+                    if tx_bits is not None and fid < len(tx_bits) and np.any(tx_bits[fid]):
+                        ref = tx_bits[fid].astype(np.int64)
+                        ber_errs += int(np.sum(payload_bits != ref))
+                        ber_total += PAYLOAD_LEN
+
                     if total <= 5 or total % 100 == 0:
                         hmag = abs(chan['h'])
                         snr = 10 * np.log10(max(hmag ** 2 / sigma2_clip, 1e-30))
-                        fid = _b2i(hdr[:16])
                         lat_us = -1
                         if tx_ts is not None and fid < len(tx_ts) and tx_ts[fid] > 0:
                             lat_us = int((time.time_ns() - tx_ts[fid]) / 1000)
@@ -290,8 +298,12 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
           f"({crc_ok_cnt/max(total,1)*100:.1f}%)  "
           f"HDR={hdr_ok_cnt}  false_alarms={false_alarms}",
           flush=True)
+    if ber_total > 0:
+        print(f"  BER={ber_errs/ber_total*100:.2f}%  ({ber_errs}/{ber_total})",
+              flush=True)
     shm.close()
     if tx_ts_shm: tx_ts_shm.close()
+    if tx_bits_shm: tx_bits_shm.close()
 
 
 # ===================================================================
@@ -355,9 +367,13 @@ def main():
     tx_ts = np.ndarray(args.num_frames, dtype=np.uint64, buffer=tx_ts_shm.buf)
     tx_ts[:] = 0
 
+    tx_bits_shm = shared_memory.SharedMemory(create=True, size=args.num_frames * PAYLOAD_LEN)
+    tx_bits_arr = np.ndarray((args.num_frames, PAYLOAD_LEN), dtype=np.int8, buffer=tx_bits_shm.buf)
+    tx_bits_arr[:] = 0
+
     proc = ctx.Process(target=_proc_worker,
                        args=(shm.name, wr_count, has_data, running, args.num_frames,
-                             tx_ts_shm.name),
+                             tx_ts_shm.name, tx_bits_shm.name),
                        daemon=True)
     proc.start()
     print(f"[loopback] 处理子进程 PID={proc.pid}")
@@ -389,6 +405,7 @@ def main():
         for f in range(args.num_frames):
             tx_ts[f] = time.time_ns()
             raw = np.random.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
+            tx_bits_arr[f] = raw.astype(np.int8)
             iq = rrc_filter(build_frame(raw, f), RRC, SPS)
             tx.send(iq.astype(np.complex64), md); md.start_of_burst = False
             if gap > 0:
@@ -410,6 +427,7 @@ def main():
     if proc.is_alive(): proc.terminate()
     shm.close(); shm.unlink()
     tx_ts_shm.close(); tx_ts_shm.unlink()
+    tx_bits_shm.close(); tx_bits_shm.unlink()
 
 
 if __name__ == '__main__':
