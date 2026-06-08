@@ -31,7 +31,7 @@ FRAME_RRC_SAMPLES = 496 * SPS + len(RRC) - 1  # 1012 samples
 # 子进程: PHY 处理 (从共享内存读, 随便多慢都不影响 USRP)
 # ===================================================================
 
-def _proc_worker(shm_name, wr_count, has_data, running, num_frames):
+def _proc_worker(shm_name, wr_count, has_data, running, num_frames, result_path):
     shm = shared_memory.SharedMemory(name=shm_name)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
 
@@ -173,6 +173,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames):
     buf = np.zeros(1_000_000, dtype=np.complex64); buf_len = 0
     rd = 0; total = 0; hdr_ok_cnt = 0; crc_ok_cnt = 0
     false_alarms = 0
+    results = []  # (frame_id, global_pos, payload_bits)
 
     while running.value:
         has_data.wait(timeout=0.5); has_data.clear()
@@ -251,6 +252,9 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames):
                     if hdr_ok: hdr_ok_cnt += 1
                     if crc_ok: crc_ok_cnt += 1
 
+                    fid = _b2i(hdr[:16])
+                    results.append((fid, es + fs * SPS, payload_bits.copy()))
+
                     if total <= 5 or total % 100 == 0:
                         hmag = abs(chan['h'])
                         snr = 10 * np.log10(max(hmag ** 2 / sigma2_clip, 1e-30))
@@ -283,6 +287,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames):
           f"({crc_ok_cnt/max(total,1)*100:.1f}%)  "
           f"HDR={hdr_ok_cnt}  false_alarms={false_alarms}",
           flush=True)
+    if results:
+        np.save(result_path, np.array(results, dtype=object), allow_pickle=True)
     shm.close()
 
 
@@ -344,7 +350,8 @@ def main():
     running = ctx.Value('i', 1)
 
     proc = ctx.Process(target=_proc_worker,
-                       args=(shm.name, wr_count, has_data, running, args.num_frames),
+                       args=(shm.name, wr_count, has_data, running, args.num_frames,
+                             'loopback_results.npy'),
                        daemon=True)
     proc.start()
     print(f"[loopback] 处理子进程 PID={proc.pid}")
@@ -369,12 +376,14 @@ def main():
     # ── TX 线程 ──
     gap = max(16, int(args.frame_gap_ms * SAMP_RATE / 1000))
     tx_done = threading.Event()
+    tx_bits = [None] * args.num_frames  # 按 frame_id 索引
 
     def tx_thread():
         from sender import build_frame, rrc_filter
         md = uhd.types.TXMetadata(); md.start_of_burst = True
         for f in range(args.num_frames):
             raw = np.random.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
+            tx_bits[f] = raw
             iq = rrc_filter(build_frame(raw, f), RRC, SPS)
             tx.send(iq.astype(np.complex64), md); md.start_of_burst = False
             if gap > 0:
@@ -394,6 +403,40 @@ def main():
     time.sleep(3)
     running.value = 0; proc.join(timeout=5)
     if proc.is_alive(): proc.terminate()
+
+    # ── 离线 BER + gap-noise SNR ──
+    result_file = 'loopback_results.npy'
+    try:
+        results = np.load(result_file, allow_pickle=True)
+        errs = 0; total_bits = 0
+        positions = []
+        for fid, pos, payload in results:
+            fid = int(fid); pos = int(pos)
+            positions.append(pos)
+            if fid < len(tx_bits) and tx_bits[fid] is not None:
+                ref = tx_bits[fid]
+                errs += int(np.sum(payload.astype(np.int64) != ref.astype(np.int64)))
+                total_bits += PAYLOAD_LEN
+        ber = errs / max(total_bits, 1)
+
+        # gap-noise SNR
+        if len(positions) >= 2:
+            gap_iqs = []
+            ring_full = np.array(ring[:RING_CAP], copy=True)
+            for i in range(len(positions) - 1):
+                g0 = positions[i] + FRAME_RRC_SAMPLES + 100
+                g1 = positions[i + 1] - 100
+                if g1 - g0 > 500 and g1 < RING_CAP:
+                    gap_iqs.append(ring_full[g0:g1])
+            if gap_iqs:
+                gap_all = np.concatenate(gap_iqs)
+                noise_var = float(np.var(gap_all))
+                sig_pow = float(np.mean(np.abs(ring_full[positions[0]:positions[0]+FRAME_RRC_SAMPLES])**2))
+                gap_snr = 10 * np.log10(max(sig_pow - noise_var, 1e-30) / max(noise_var, 1e-30))
+                print(f"  BER={ber*100:.2f}%  ({errs}/{total_bits})  gapSNR={gap_snr:.1f}dB")
+    except Exception:
+        pass
+
     shm.close(); shm.unlink()
 
 

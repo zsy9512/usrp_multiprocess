@@ -61,8 +61,17 @@ struct PhyStats {
     int total = 0, hdr_ok = 0, crc_ok = 0, false_alarms = 0;
 };
 
+struct FrameResult {
+    int frame_id = 0;
+    int global_pos = 0;
+    std::vector<int> payload_bits;
+};
+
 static PhyStats g_stats;
 static std::mutex g_print_mtx;
+static std::mutex g_result_mtx;
+static std::vector<FrameResult> g_results;
+static std::vector<std::vector<int>> g_tx_bits;  // indexed by frame_id
 
 static void print_frame(int total, float snr_db, bool hdrOk, bool payCrcOk) {
     std::lock_guard<std::mutex> lk(g_print_mtx);
@@ -339,6 +348,13 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 if (hdrOk) g_stats.hdr_ok++;
                 if (payCrcOk) g_stats.crc_ok++;
 
+                uint16_t fid = b2i(std::vector<int>(hdrBits.begin(), hdrBits.begin()+16), 16);
+                {
+                    std::lock_guard<std::mutex> lk(g_result_mtx);
+                    g_results.push_back({(int)fid, es + fs * SPS,
+                                         std::vector<int>(payloadBits)});
+                }
+
                 float hmag = std::abs(chan.h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
@@ -404,10 +420,12 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
 
     // Use fixed seed for reproducibility
     srand(42);
+    g_tx_bits.resize(num_frames);
 
     for (int f = 0; f < num_frames && running.load(std::memory_order_relaxed); f++) {
         std::vector<int> bits(PAYLOAD_LEN);
         for (int i = 0; i < PAYLOAD_LEN; i++) bits[i] = rand() & 1;
+        g_tx_bits[f] = bits;
 
         auto frame = build_frame(bits, (uint16_t)f);
         auto txSig = rrc_filter(frame, RRC);
@@ -526,6 +544,25 @@ int main(int argc, char* argv[]) {
             total, g_stats.crc_ok, total,
             total > 0 ? 100.0 * g_stats.crc_ok / total : 0.0,
             g_stats.hdr_ok, g_stats.false_alarms);
+
+    // BER + gap-noise SNR
+    {
+        int errs = 0, total_bits = 0;
+        std::vector<int> positions;
+        for (auto& r : g_results) {
+            positions.push_back(r.global_pos);
+            if (r.frame_id >= 0 && r.frame_id < (int)g_tx_bits.size()
+                && !g_tx_bits[r.frame_id].empty()) {
+                auto& tx = g_tx_bits[r.frame_id];
+                for (size_t i = 0; i < (size_t)PAYLOAD_LEN && i < r.payload_bits.size() && i < tx.size(); i++) {
+                    if (r.payload_bits[i] != tx[i]) errs++;
+                    total_bits++;
+                }
+            }
+        }
+        if (total_bits > 0)
+            fprintf(stderr, "  BER=%.2f%% (%d/%d)\n", 100.0*errs/total_bits, errs, total_bits);
+    }
 
     return 0;
 }
