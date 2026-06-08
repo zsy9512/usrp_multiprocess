@@ -83,15 +83,16 @@ static void print_frame(int total, float snr_db, int64_t avg_lat_us, bool hdrOk,
     fflush(stderr);
 }
 
-// ---- RRC matched filter ----
-static std::vector<C64> rrc_match_local(const std::vector<C64>& samples) {
-    int N = (int)samples.size();
+// ---- RRC matched filter (pointer-based, no copy) ----
+static std::vector<C64> rrc_match_ptr(const C64* samples, int N) {
     int M = (int)RRC.size();
     int convLen = N + M - 1;
     std::vector<C64> filt(convLen, C64(0,0));
     for (int i = 0; i < convLen; i++) {
         C64 sum(0,0);
-        for (int j = 0; j < M; j++) {
+        int j0 = (std::max)(0, i - N + 1);
+        int j1 = (std::min)(M, i + 1);
+        for (int j = j0; j < j1; j++) {
             int sidx = i - j;
             if (sidx >= 0 && sidx < N)
                 sum += samples[sidx] * RRC[M - 1 - j];
@@ -187,8 +188,7 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 int ee = (std::min)(buf_len, coarse + EXTRACT_EXTRA + FRAME_RRC_SAMPLES + EXTRACT_EXTRA);
                 if (ee - es < PSS_LEN * SPS) continue;
 
-                std::vector<C64> chunkR(buf.begin() + es, buf.begin() + ee);
-                auto syms = rrc_match_local(chunkR);
+                auto syms = rrc_match_ptr(buf.data() + es, ee - es);
                 if ((int)syms.size() < PSS_LEN + RS_LEN) continue;
 
                 // PSS
