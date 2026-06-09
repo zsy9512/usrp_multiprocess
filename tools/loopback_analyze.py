@@ -155,6 +155,15 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
     if stf_energy is None:
         stf_energy = STF_MIN_ENERGY
 
+    # ── 标准 SNR 底噪: 从 IQ 开头静默期测量 (RX 先于 TX 启动) ──
+    n_noise = min(50000, n_total)
+    noise_iq = iq[:n_noise]
+    noise_syms = rrc_match(noise_iq)
+    noise_floor = float(np.var(noise_syms))
+    if verbose:
+        print(f"  [scan] Noise floor (IQ prefix, {n_noise} samples): "
+              f"{noise_floor:.6f}  ({10*np.log10(max(noise_floor, 1e-30)):.1f} dB)")
+
     # ── 阶段 1: 全量 STF 检测 (分段处理以控制内存) ──
     seg_size = 1_000_000
     overlap = FRAME_RRC_SAMPLES + 5000  # 帧+gap 长度, 确保帧不会被分割
@@ -254,7 +263,9 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
         evm = np.sqrt(np.mean(np.abs(pay_y - (1 - 2 * pay_bits))**2))
         evm_db = 20 * np.log10(evm + 1e-30)
         hmag = abs(chan['h'])
-        snr = 10 * np.log10(max(hmag**2 / min(chan['sigma2'], 0.5), 1e-30))
+        # 标准 SNR: |h|² / 独立底噪 (gap 分析阶段会进一步修正)
+        nf = noise_floor if noise_floor > 0 else 0.5
+        snr = 10 * np.log10(max(hmag**2 / nf, 1e-30))
 
         # 定时偏 (PSS 二次插值)
         if pk > 0 and pk < len(pss_corr) - 1:

@@ -181,11 +181,26 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     false_alarms = 0
     ber_errs = 0; ber_total = 0
     total_lat_us = 0
+    noise_floor = None  # 标准 SNR 底噪: 启动期独立测量
 
     while running.value:
         has_data.wait(timeout=0.5); has_data.clear()
         wc = wr_count.value; avail = wc - rd
         if avail <= 0: continue
+
+        # ---- 标准 SNR 底噪测量（从 ring buffer 直接读，避开 buf 的 5000-cap 窗口） ----
+        if noise_floor is None and wc >= 50000:
+            start = (wc - 50000) % RING_CAP
+            end = wc % RING_CAP
+            if end > start:
+                noise_iq = ring[start:end].copy()
+            else:
+                noise_iq = np.concatenate([ring[start:], ring[:end]])
+            noise_syms = _rrc_match(noise_iq)
+            noise_floor = float(np.var(noise_syms))
+            print(f"  [loopback] Noise floor (symbol-level): {noise_floor:.6f}  "
+                  f"({10*np.log10(max(noise_floor, 1e-30)):.1f} dB)", flush=True)
+
         if avail > RING_CAP: rd = wc - RING_CAP
 
         CHUNK = 4096
@@ -243,6 +258,12 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                     if chan is None: continue
 
                     sigma2_clip = min(chan['sigma2'], 0.5)
+                    # 标准 SNR: 信号功率 / 独立底噪
+                    hmag = abs(chan['h'])
+                    nf = noise_floor if noise_floor is not None else 0.5  # fallback
+                    snr_db = 10 * np.log10(max(hmag**2 / max(nf, 1e-30), 1e-30))
+                    # EVM: 均衡残差 (反映定时/CFO 等所有损伤)
+                    evm_db = 10 * np.log10(max(sigma2_clip, 1e-30))
 
                     # ④ 解调 Header
                     hdr_start = rp + RS_LEN
@@ -272,15 +293,14 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                         total_lat_us += int((time.time_ns() - tx_ts[fid]) / 1000)
 
                     if total <= 5 or total % 100 == 0:
-                        hmag = abs(chan['h'])
-                        snr = 10 * np.log10(max(hmag ** 2 / sigma2_clip, 1e-30))
                         avg_lat = total_lat_us // max(total, 1)
                         print(
                             f"  frame={total:5d}  "
                             f"ptm={ptm:.1f}  pts={pts:.1f}  "
                             f"\u0394f0={chan['coarse_cfo']:+.0f}  "
                             f"\u0394f1={chan['fine_cfo']:+.0f}  "
-                            f"|h|={hmag:.3f}  SNR={snr:.1f}dB  "
+                            f"|h|={hmag:.3f}  SNR={snr_db:.1f}dB  "
+                            f"EVM={evm_db:.1f}dB  "
                             f"avglat={avg_lat}us  "
                             f"HDR={'OK' if hdr_ok else 'XX'}  "
                             f"CRC={'OK' if crc_ok else 'XX'}",

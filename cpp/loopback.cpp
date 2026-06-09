@@ -74,38 +74,22 @@ static PhyStats g_stats;
 static std::mutex g_print_mtx;
 static std::mutex g_result_mtx;
 static std::vector<FrameResult> g_results;
+static float g_noise_floor = 0.0f;  // measured during settling period (symbol-level)
 static std::vector<std::vector<int>> g_tx_bits;  // indexed by frame_id
 static std::vector<std::chrono::steady_clock::time_point> g_tx_ts;  // indexed by frame_id
 
-static void print_frame(int total, float snr_db, int64_t avg_lat_us, bool hdrOk, bool payCrcOk) {
+static void print_frame(int total, float snr_db, float evm_db, int64_t avg_lat_us,
+                        bool hdrOk, bool payCrcOk) {
     std::lock_guard<std::mutex> lk(g_print_mtx);
-    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  avglat=%lldus  HDR=%s  CRC=%s\n",
-        total, snr_db, (long long)avg_lat_us,
+    fprintf(stderr, "  frame=%5d  SNR=%.1fdB  EVM=%.1fdB  avglat=%lldus  HDR=%s  CRC=%s\n",
+        total, snr_db, evm_db, (long long)avg_lat_us,
         hdrOk ? "OK" : "XX", payCrcOk ? "OK" : "XX");
     fflush(stderr);
 }
 
-// ---- RRC matched filter ----
+// ---- RRC matched filter (delegates to shared implementation in phy_dsp.h) ----
 static std::vector<C64> rrc_match_local(const std::vector<C64>& samples) {
-    int N = (int)samples.size();
-    int M = (int)RRC.size();
-    int convLen = N + M - 1;
-    std::vector<C64> filt(convLen, C64(0,0));
-    for (int i = 0; i < convLen; i++) {
-        C64 sum(0,0);
-        for (int j = 0; j < M; j++) {
-            int sidx = i - j;
-            if (sidx >= 0 && sidx < N)
-                sum += samples[sidx] * RRC[M - 1 - j];
-        }
-        filt[i] = sum;
-    }
-    int delay = (M - 1) / 2;
-    int nOut = (convLen - delay + SPS - 1) / SPS;
-    std::vector<C64> out(nOut);
-    for (int k = 0; k < nOut; k++)
-        out[k] = filt[delay + k * SPS];
-    return out;
+    return rrc_match(samples, RRC);
 }
 
 // ---- STF clustering (wrap from phy_dsp) ----
@@ -245,10 +229,12 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                 for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
 
                 float hmag = std::abs(h);
-                float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
+                // Standard SNR: signal power / independent noise floor
+                float snrDb = 10.0f * std::log10(std::max(hmag * hmag / g_noise_floor, 1e-30f));
+                // EVM (dB) from equalization residual — captures timing/CFO/nonlinearity
+                float evmDb = 10.0f * std::log10(std::max(sigma2, 1e-30f));
 
                 // Only accumulate latency / BER for frames with valid header
-                int64_t avg_lat = 0;
                 if (hdrOk) {
                     {
                         std::lock_guard<std::mutex> lk(g_result_mtx);
@@ -261,12 +247,14 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
                             now - g_tx_ts[fid]).count();
                         g_stats.total_lat_us += lat;
                         g_stats.lat_count++;
-                        avg_lat = g_stats.total_lat_us / g_stats.lat_count;
                     }
                 }
+                // Running average from global stats (always shows valid value)
+                int64_t avg_lat = (g_stats.lat_count > 0)
+                    ? g_stats.total_lat_us / g_stats.lat_count : 0;
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
+                    print_frame(g_stats.total, snrDb, evmDb, avg_lat, hdrOk, payCrcOk);
                 }
 
                 // Consume window
@@ -330,9 +318,6 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
         rng_state = rng_state * 1664525u + 1013904223u;
         return (rng_state >> 31) & 1u;
     };
-    g_tx_bits.resize(num_frames);
-    g_tx_ts.resize(num_frames);
-
     for (int f = 0; f < num_frames && running.load(std::memory_order_relaxed); f++) {
         std::vector<int> bits(PAYLOAD_LEN);
         for (int i = 0; i < PAYLOAD_LEN; i++) bits[i] = next_bit();
@@ -434,6 +419,11 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> running(true);
     std::atomic<int> overflow_count(0);
 
+    // Pre-allocate TX reference storage before starting threads
+    // (avoids data race between tx_th resize and proc_th size())
+    g_tx_bits.resize(num_frames);
+    g_tx_ts.resize(num_frames);
+
     std::thread rx_th(rx_thread_func, rx_stream, std::ref(ring),
                       std::ref(running), std::ref(overflow_count));
 
@@ -442,6 +432,26 @@ int main(int argc, char* argv[]) {
     std::thread proc_th(process_loop, std::ref(ring), std::ref(running), (float)rate);
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Measure noise floor from ring buffer (pure noise, TX not started yet)
+    {
+        size_t wc = ring.wr_count.load(std::memory_order_acquire);
+        constexpr int NOISE_IQ_SAMPLES = 50000;  // 50ms of IQ @ 1Msps
+        if (wc >= (size_t)NOISE_IQ_SAMPLES) {
+            size_t start = wc - NOISE_IQ_SAMPLES;
+            std::vector<C64> noiseIQ(NOISE_IQ_SAMPLES);
+            ring.copy_to_vec(noiseIQ, start, NOISE_IQ_SAMPLES);
+            auto noiseSyms = rrc_match(noiseIQ, RRC);
+            float sumSq = 0.0f;
+            for (auto& s : noiseSyms) sumSq += std::norm(s);
+            g_noise_floor = sumSq / (float)noiseSyms.size();
+            printf("[loopback] Noise floor (symbol-level): %.6f  (%.1f dB)\n",
+                   g_noise_floor,
+                   10.0f * std::log10(std::max(g_noise_floor, 1e-30f)));
+        } else {
+            printf("[loopback] WARNING: not enough samples for noise floor measurement\n");
+        }
+    }
 
     // Flush any accumulated noise backlog from the ring buffer,
     // so proc_th starts fresh from TX data.
