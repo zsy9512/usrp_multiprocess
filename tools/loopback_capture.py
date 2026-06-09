@@ -12,7 +12,8 @@ loopback_capture.py — B210 自发自收 IQ 采集 (用于离线调试同步链
   python tools/loopback_capture.py --serial 320F33F -o capture/baseline
   python tools/loopback_capture.py --serial 320F33F --rx-subdev B:A -o capture/subb_b
 """
-import argparse, os, sys, time, threading, queue
+import argparse, json, os, sys, time, threading, queue
+from datetime import datetime, timezone
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -134,8 +135,39 @@ def main():
     # ── 保存 ──
     iq_path = args.output + '_iq.npy'
     bits_path = args.output + '_bits.npy'
+    meta_path = args.output + '_meta.json'
     np.save(iq_path, rx_iq)
     np.save(bits_path, tx_bits)
+
+    # 元数据 JSON
+    from phy_params import STF_THRESHOLD, STF_MIN_ENERGY
+    meta = {
+        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'freq_hz': args.freq,
+        'gain_tx_db': args.gain_tx,
+        'gain_rx_db': args.gain_rx,
+        'rx_channel': args.rx_channel,
+        'rx_antenna': args.rx_antenna,
+        'num_frames': args.num_frames,
+        'frame_gap_ms': args.frame_gap_ms,
+        'samp_rate': 1e6,
+        'sps': SPS,
+        'serial': args.serial,
+        'stf_threshold': STF_THRESHOLD,
+        'stf_min_energy': STF_MIN_ENERGY,
+        'pss_ptm': 3.5,
+        'pss_pts': 1.5,
+        'rs_corr_thr': 0.3,
+        'payload_len': PAYLOAD_LEN,
+        'header_len': HEADER_LEN,
+        'stf_len': STF_LEN,
+        'pss_len': PSS_LEN,
+        'rs_len': RS_LEN,
+        'frame_rrc_samples': FRAME_RRC_SAMPLES,
+    }
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    print(f"  元数据: {meta_path}")
 
     # ── 信号质量诊断 ──
     mag = np.abs(rx_iq)

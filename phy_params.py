@@ -57,6 +57,21 @@ TS = 1.0 / 1e6
 INFO_BITS = 128
 
 # ======================================================================
+# SNR / Sigma2 测量方法 (统一口径, 2026-06)
+# ======================================================================
+
+# 规范 SNR 定义: SNR_symbol = 10*log10(|h|^2 / noise_floor)
+#   noise_floor = var( RRC_matched(first_N_IQ_samples) )  — 符号域独立底噪
+# 参考: tools/snr_metrics.py (统一实现)
+SNR_METHOD = "symbol_domain"        # canonical SNR type
+NOISE_FLOOR_WINDOW = 50000          # IQ samples for noise floor measurement
+
+# Sigma2 (RS 残差方差) 计算方法
+#   "welch":  s2 = max(sum(|noise|^2) / (RS_LEN - 1), 1e-30)
+#   等效于 np.var(noise) * RS_LEN/(RS_LEN-1)  if noise is zero-mean
+SIGMA2_METHOD = "welch"
+
+# ======================================================================
 # 同步检测参数
 # ======================================================================
 
@@ -67,6 +82,8 @@ STF_THRESHOLD = 0.4
 STF_MIN_ENERGY = 0.02 * STF_DELAY  # 0.64, 适配较宽信号动态范围 (原 3.2 过于严格)
 
 # PSS 峰值质量门限
+#   Design values:  ptm=4.0  pts=1.5  (高 SNR 严格)
+#   Operational defaults:  ptm=3.5  pts=1.5  (低 SNR 放宽, 与 loopback_test/polar_loopback 一致)
 PSS_PEAK_TO_MEAN_THR = 4.0
 PSS_PEAK_TO_SECOND_THR = 1.5
 

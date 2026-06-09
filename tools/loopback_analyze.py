@@ -17,6 +17,8 @@ from phy_params import (SPS, STF, PSS, RS, RRC, STF_LEN, PSS_LEN, RS_LEN,
                         HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN, STF_DELAY,
                         STF_THRESHOLD, STF_MIN_ENERGY, FRAME_RRC_SAMPLES,
                         crc16, crc16_check, bits_to_bytes, bytes_to_bits)
+from tools.snr_metrics import (snr_symbol_domain, snr_from_sigma2,
+                                evm_from_sigma2, sigma2_welch)
 
 SAMP_RATE = 1e6
 TS_SYM = SPS / SAMP_RATE
@@ -112,7 +114,7 @@ def rs_estimate(syms, rs_pos, coarse_cfo=0.0):
     h = np.mean(rs_corrected * np.conj(RS))
     if abs(h) < 1e-6: return None
     noise = rs_corrected / h - RS
-    s2 = max(float(np.var(noise)) * RS_LEN / (RS_LEN - 1), 1e-30)
+    s2 = max(float(np.sum(np.abs(noise) ** 2) / (RS_LEN - 1)), 1e-30)
     rs_corr = float(np.abs(np.sum(rs_corrected * np.conj(RS))))
     if rs_corr < RS_LEN * 0.3: return None
     return {'h': h, 'phase_est': float(np.angle(h)), 'sigma2': s2,
@@ -259,13 +261,15 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
         # BER vs 参考 (暂存 -1, 排序后重新计算)
         ber = -1.0
 
-        # 质量指标
-        evm = np.sqrt(np.mean(np.abs(pay_y - (1 - 2 * pay_bits))**2))
-        evm_db = 20 * np.log10(evm + 1e-30)
+        # 质量指标 — 多口径 SNR (统一于 tools/snr_metrics.py)
         hmag = abs(chan['h'])
-        # 标准 SNR: |h|² / 独立底噪 (gap 分析阶段会进一步修正)
+        # prefix SNR: |h|² / 独立底噪 (与 polar_loopback.py / loopback_test.py 一致)
         nf = noise_floor if noise_floor > 0 else 0.5
-        snr = 10 * np.log10(max(hmag**2 / nf, 1e-30))
+        snr_prefix = snr_symbol_domain(hmag, nf)
+        # RS residual SNR: |h|² / sigma2 (与 receiver.py _estimate_snr 一致)
+        snr_rs = snr_from_sigma2(hmag, chan['sigma2'])
+        # EVM (via snr_metrics, 10*log10 clipped sigma2)
+        evm_db = evm_from_sigma2(chan['sigma2'])
 
         # 定时偏 (PSS 二次插值)
         if pk > 0 and pk < len(pss_corr) - 1:
@@ -282,7 +286,9 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
             'ptm': ptm, 'pts': pts,
             'hdr_ok': hdr_ok, 'crc_ok': crc_ok,
             'ber': ber,
-            'hmag': hmag, 'snr': snr,
+            'hmag': hmag, 'snr': snr_prefix,  # canonical symbol-domain SNR
+            'snr_prefix': snr_prefix,           # |h|² / noise_floor
+            'snr_rs': snr_rs,                   # |h|² / sigma2
             'evm_db': evm_db,
             'coarse_cfo': chan['coarse_cfo'],
             'fine_cfo': chan['fine_cfo'],
@@ -339,14 +345,14 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
             if gap_iqs:
                 gap_all = np.concatenate(gap_iqs)
                 noise_var = float(np.var(gap_all))
-                # 更新每帧 SNR
+                # 更新每帧 gap SNR (secondary metric, stored separately)
                 for f in frames:
                     sig_pow = float(np.mean(np.abs(f['constellation'])**2))
                     snr_linear = max(sig_pow - noise_var, 1e-30) / max(noise_var, 1e-30)
-                    f['snr'] = float(10 * np.log10(snr_linear))
+                    f['snr_gap'] = float(10 * np.log10(snr_linear))
                 if verbose:
-                    print(f"  [scan] gap noise σ²={noise_var:.2e}  "
-                          f"SNR(mean)={np.mean([f['snr'] for f in frames]):.1f}dB")
+                    print(f"  [scan] gap noise sigma2={noise_var:.2e}  "
+                          f"SNR_gap(mean)={np.mean([f['snr_gap'] for f in frames]):.1f}dB")
 
     if verbose:
         print(f"  [scan] frames detected: {len(frames)} "
@@ -379,8 +385,17 @@ def print_report(frames, tx_bits):
               f"(max={np.max(bers)*100:.2f}%)")
 
     if snrs:
-        print(f"\n  SNR:  mean={np.mean(snrs):.1f}  std={np.std(snrs):.1f}  "
+        print(f"\n  SNR (symbol, prefix):  mean={np.mean(snrs):.1f}  std={np.std(snrs):.1f}  "
               f"min={np.min(snrs):.1f}  max={np.max(snrs):.1f} dB")
+    # Show additional SNR metrics if available
+    snrs_rs = [f['snr_rs'] for f in frames if 'snr_rs' in f]
+    snrs_gap = [f['snr_gap'] for f in frames if 'snr_gap' in f]
+    if snrs_rs:
+        print(f"  SNR (RS residual):     mean={np.mean(snrs_rs):.1f}  std={np.std(snrs_rs):.1f}  "
+              f"min={np.min(snrs_rs):.1f}  max={np.max(snrs_rs):.1f} dB")
+    if snrs_gap:
+        print(f"  SNR (gap, IQ domain):  mean={np.mean(snrs_gap):.1f}  std={np.std(snrs_gap):.1f}  "
+              f"min={np.min(snrs_gap):.1f}  max={np.max(snrs_gap):.1f} dB")
     if cfo_totals:
         print(f"  CFO:  mean={np.mean(cfo_totals):+.1f}  std={np.std(cfo_totals):.1f}  "
               f"min={np.min(cfo_totals):+.1f}  max={np.max(cfo_totals):+.1f} Hz")
@@ -402,20 +417,20 @@ def print_report(frames, tx_bits):
 
     issues = []
     if n == 0:
-        issues.append("❌ 未检测到任何帧 — 检查增益是否合适, SMA是否连接")
+        issues.append("[FAIL] 未检测到任何帧 — 检查增益是否合适, SMA是否连接")
     elif crc_ok / max(n, 1) < 0.9:
         if snrs and np.mean(snrs) < 15:
-            issues.append(f"⚠ SNR 偏低 ({np.mean(snrs):.1f}dB)")
+            issues.append(f"[WARN] SNR 偏低 ({np.mean(snrs):.1f}dB)")
         if cfo_totals and np.std(cfo_totals) > 30:
-            issues.append(f"⚠ CFO 波动大 (σ={np.std(cfo_totals):.0f}Hz) → PSS定时跳变")
+            issues.append(f"[WARN] CFO 波动大 (σ={np.std(cfo_totals):.0f}Hz) → PSS定时跳变")
         if timing_offs and np.std(timing_offs) > 0.5:
-            issues.append(f"⚠ 定时偏抖动 (σ={np.std(timing_offs):.2f}sym)")
+            issues.append(f"[WARN] 定时偏抖动 (σ={np.std(timing_offs):.2f}sym)")
 
     if not issues:
         if crc_ok / max(n, 1) >= 0.95:
-            issues.append("✅ 同步链工作正常, CRC≥95%")
+            issues.append("[OK] 同步链工作正常, CRC≥95%")
         else:
-            issues.append(f"ℹ CRC={crc_ok/max(n,1)*100:.0f}%")
+            issues.append(f"[INFO] CRC={crc_ok/max(n,1)*100:.0f}%")
 
     print("  【诊断】")
     for iss in issues:
@@ -689,7 +704,11 @@ def main():
     p.add_argument('--scan', action='store_true')
     p.add_argument('--compare', default='', help='对比目标前缀 (如 capture/int_sb10)')
     p.add_argument('--ptm', type=float, default=3.5)
-    p.add_argument('--pts', type=float, default=1.0)
+    p.add_argument('--pts', type=float, default=1.5)
+    p.add_argument('--snr-method', default='all',
+                   choices=['prefix', 'rs', 'gap', 'all'],
+                   help='SNR reporting method: prefix (match real-time), '
+                        'rs (RS residual), gap (inter-frame gaps), all (default)')
     p.add_argument('--stf-energy', type=float, default=0,
                    help='STF能量门限 (0=使用phy_params默认)')
     p.add_argument('--debug', type=int, default=0,
@@ -710,9 +729,9 @@ def main():
     peak = np.max(mag); rms = np.sqrt(np.mean(mag**2))
     clipped_pct = np.sum(mag > 0.98) / len(iq) * 100
     print(f"  幅度: peak={peak:.4f}  RMS={rms:.4f}  clipped={clipped_pct:.1f}%", end="")
-    if clipped_pct > 5: print("  ⚠ 严重削峰!")
-    elif peak > 0.95: print("  ⚠ 有削峰")
-    else: print("  ✅")
+    if clipped_pct > 5: print("  [WARN] 严重削峰!")
+    elif peak > 0.95: print("  [WARN] 有削峰")
+    else: print("  [OK]")
 
     tx_bits = None
     if os.path.isfile(bits_path):

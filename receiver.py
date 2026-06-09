@@ -782,10 +782,10 @@ def main():
     p.add_argument('--settle', type=float, default=1.0, help='外部参考锁定时长 (s)')
     p.add_argument('--stf-threshold', type=float, default=STF_THRESHOLD,
                    help='STF 包检测门限')
-    p.add_argument('--pss-ptm', type=float, default=PSS_PEAK_TO_MEAN_THR,
-                   help='PSS 峰均比门限')
-    p.add_argument('--pss-pts', type=float, default=PSS_PEAK_TO_SECOND_THR,
-                   help='PSS 峰次比门限')
+    p.add_argument('--pss-ptm', type=float, default=3.5,
+                   help='PSS 峰均比门限 (operational default=3.5, design PSS_PEAK_TO_MEAN_THR=4.0)')
+    p.add_argument('--pss-pts', type=float, default=1.5,
+                   help='PSS 峰次比门限 (operational default=1.5, design PSS_PEAK_TO_SECOND_THR=1.5)')
     p.add_argument('--rs-corr-thr', type=float, default=0.3,
                    help='RS 相关门限 (相对值)')
     args = p.parse_args()

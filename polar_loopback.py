@@ -13,7 +13,8 @@
     STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
     Payload 承载 N=256 极化编码比特；CRC 仅传输占位，RX 侧不验证。
 """
-import sys, os, time, threading, argparse, math
+import sys, os, time, threading, argparse, math, json
+from datetime import datetime, timezone
 import numpy as np
 import multiprocessing as mp
 from multiprocessing import shared_memory, Process, Event, Value
@@ -77,7 +78,9 @@ def _polar_hard_inverse(llr):
 
 def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                  tx_ts_shm_name, tx_info_shm_name, samp_rate,
-                 dump_shm_name=None):
+                 dump_shm_name=None,
+                 thresholds=None, noise_window=50000,
+                 dump_stats_shm_name=None):
     shm = shared_memory.SharedMemory(name=shm_name)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
     tx_ts_shm = shared_memory.SharedMemory(name=tx_ts_shm_name) if tx_ts_shm_name else None
@@ -85,6 +88,16 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     tx_info_shm = shared_memory.SharedMemory(name=tx_info_shm_name) if tx_info_shm_name else None
     tx_info = np.ndarray((num_frames, K), dtype=np.int8, buffer=tx_info_shm.buf) if tx_info_shm else None
     ts_sym = SPS / samp_rate
+
+    # ── 阈值提取 ──
+    if thresholds is None:
+        thresholds = {}
+    stf_thr    = thresholds.get('stf_threshold', STF_THRESHOLD)
+    stf_energy = thresholds.get('stf_min_energy', STF_MIN_ENERGY)
+    pss_ptm    = thresholds.get('pss_ptm', 3.5)
+    pss_pts    = thresholds.get('pss_pts', 1.5)
+    rs_corr_th = thresholds.get('rs_corr_thr', 0.3)
+    fine_cfo_max = thresholds.get('fine_cfo_max', 500)
 
     # ── LLR dump 共享内存 ──
     dump_shm = None
@@ -96,6 +109,16 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         dump_row_bytes = 4 + N * 4 + K
         dump_data = np.ndarray((num_frames, dump_row_bytes), dtype=np.uint8,
                                buffer=dump_shm.buf)
+
+    # ── 逐帧统计 dump 共享内存 ──
+    stats_shm = None
+    stats_data = None
+    stats_count = 0
+    if dump_stats_shm_name is not None:
+        stats_shm = shared_memory.SharedMemory(name=dump_stats_shm_name)
+        stats_row_bytes = 32 * 8  # 32 float64
+        stats_data = np.ndarray((num_frames, stats_row_bytes), dtype=np.uint8,
+                                buffer=stats_shm.buf)
 
     # ------------------------------------------------------------------
     # ① STF 延迟相关 + 粗 CFO + 峰值聚类
@@ -117,9 +140,9 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         # 大于门限 + 能量足够
         raw = []
         for d in range(len(M)):
-            if M[d] > STF_THRESHOLD:
+            if M[d] > stf_thr:
                 le = np.sum(np.abs(samples[d + L:d + 2 * L]) ** 2)
-                if le > STF_MIN_ENERGY:
+                if le > stf_energy:
                     raw.append((d, M[d], P[d]))
         if not raw: return [], []
 
@@ -188,7 +211,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         fine_cfo = slope / (2 * np.pi * ts_sym)
 
         # 细 CFO 超限 → PSS 定时错误, 拒收
-        if abs(fine_cfo) > 500: return None
+        if abs(fine_cfo) > fine_cfo_max: return None
 
         # 总 CFO 补偿 + 信道估计
         total_cfo = coarse_cfo + fine_cfo
@@ -202,8 +225,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         noise = rs_corrected / h - RS
         s2 = max(float(np.sum(np.abs(noise) ** 2) / (RS_LEN - 1)), 1e-30)
 
-        # RS 相关质量门限: 平均每符号相关性 > 0.3
-        if rs_corr < RS_LEN * 0.3: return None
+        # RS 相关质量门限: 平均每符号相关性
+        if rs_corr < RS_LEN * rs_corr_th: return None
 
         return {'h': h, 'phase_est': float(np.angle(h)), 'sigma2': s2,
                 'coarse_cfo': coarse_cfo, 'fine_cfo': fine_cfo,
@@ -264,8 +287,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         if avail <= 0: continue
 
         # ---- 标准 SNR 底噪测量（从 ring buffer 直接读，避开 buf 的 5000-cap 窗口） ----
-        if noise_floor is None and wc >= 50000:
-            start = (wc - 50000) % RING_CAP
+        if noise_floor is None and wc >= noise_window:
+            start = (wc - noise_window) % RING_CAP
             end = wc % RING_CAP
             if end > start:
                 noise_iq = ring[start:end].copy()
@@ -318,8 +341,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                     if len(syms) < PSS_LEN + RS_LEN: continue
 
                     pk, ptm, pts, pval = _pss_find(syms)
-                    # PSS 质量门限 (略保守, 适配简化信道估计)
-                    if ptm < 3.5 or pts < 1.5: continue
+                    # PSS 质量门限 (可配置, 默认 ptm=3.5, pts=1.5)
+                    if ptm < pss_ptm or pts < pss_pts: continue
 
                     fs = pk - STF_LEN                    # 帧起始符号索引
                     if fs < 0: continue
@@ -383,6 +406,22 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                         dump_data[dump_count] = row
                         dump_count += 1
 
+                    # \u2500\u2500 per-frame stats dump \u2500\u2500
+                    if stats_data is not None and stats_count < num_frames:
+                        s = np.zeros(32, dtype=np.float64)
+                        s[0] = float(fid)
+                        s[1] = float(ptm); s[2] = float(pts)
+                        s[3] = chan['coarse_cfo']; s[4] = chan['fine_cfo']
+                        s[5] = chan['total_cfo']
+                        s[6] = hmag; s[7] = snr_db; s[8] = evm_db
+                        s[9] = chan['sigma2']; s[10] = chan['rs_corr']
+                        s[11] = float(hdr_ok)
+                        s[12] = float(info_errs) if 'info_errs' in dir() else 0.0
+                        # \u4ee5\u4e0b\u7531\u4e3b\u8fdb\u7a0b\u540e\u5904\u7406\u586b\u5145, \u5148\u5199 raw \u503c
+                        row = s.astype(np.float64).view(np.uint8)
+                        stats_data[stats_count] = row
+                        stats_count += 1
+
                     if total <= 5 or total % 100 == 0:
                         avg_lat = total_lat_us // max(total, 1)
                         iber = f"iBER={info_errs/max(info_total,1)*100:.2f}%" if info_total > 0 else "---"
@@ -428,6 +467,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     if tx_ts_shm: tx_ts_shm.close()
     if tx_info_shm: tx_info_shm.close()
     if dump_shm: dump_shm.close()
+    if stats_shm: stats_shm.close()
 
 
 # ===================================================================
@@ -457,6 +497,28 @@ def main():
     p.add_argument('--num-frames', type=int, default=1000)
     p.add_argument('--frame-gap-ms', type=float, default=5.0)
     p.add_argument('--dump-llr', default='', help='保存 LLR 到 .npy (离线 SGNN 评估)')
+
+    # ── 同步阈值 (可配置, 默认对齐 loopback_test.py / phy_params.py) ──
+    p.add_argument('--stf-threshold', type=float, default=STF_THRESHOLD,
+                   help=f'STF 归一化相关门限 (默认 {STF_THRESHOLD})')
+    p.add_argument('--stf-min-energy', type=float, default=STF_MIN_ENERGY,
+                   help=f'STF 最小能量门限 (默认 {STF_MIN_ENERGY})')
+    p.add_argument('--pss-ptm', type=float, default=3.5,
+                   help='PSS peak-to-mean 门限 (默认 3.5)')
+    p.add_argument('--pss-pts', type=float, default=1.5,
+                   help='PSS peak-to-second 门限 (默认 1.5)')
+    p.add_argument('--rs-corr-thr', type=float, default=0.3,
+                   help='RS 相关门限/每符号 (默认 0.3)')
+    p.add_argument('--fine-cfo-max', type=float, default=500,
+                   help='细CFO 拒收上限 Hz (默认 500)')
+    p.add_argument('--noise-window', type=int, default=50000,
+                   help='底噪测量 IQ 样本数 (默认 50000)')
+
+    # ── 元数据 / 统计导出 ──
+    p.add_argument('--save-meta', default='',
+                   help='保存阈值+配置元数据到 JSON')
+    p.add_argument('--dump-stats', default='',
+                   help='保存逐帧统计到 JSON (轻量, 不含LLR)')
 
     args = p.parse_args()
 
@@ -506,10 +568,32 @@ def main():
             size=args.num_frames * dump_row_bytes)
         dump_shm_name = dump_shm.name
 
+    # ── 逐帧统计 dump 共享内存 ──
+    stats_shm = None
+    stats_shm_name = None
+    if args.dump_stats:
+        # 每帧: 32 个 float64 统计量 = 256B
+        stats_row_bytes = 32 * 8
+        stats_shm = shared_memory.SharedMemory(create=True,
+            size=args.num_frames * stats_row_bytes)
+        stats_shm_name = stats_shm.name
+
+    # ── 阈值打包 ──
+    thresholds_dict = {
+        'stf_threshold': args.stf_threshold,
+        'stf_min_energy': args.stf_min_energy,
+        'pss_ptm': args.pss_ptm,
+        'pss_pts': args.pss_pts,
+        'rs_corr_thr': args.rs_corr_thr,
+        'fine_cfo_max': args.fine_cfo_max,
+    }
+
     proc = ctx.Process(target=_proc_worker,
                        args=(shm.name, wr_count, has_data, running, args.num_frames,
                              tx_ts_shm.name, tx_info_shm.name, args.rate,
-                             dump_shm_name),
+                             dump_shm_name,
+                             thresholds_dict, args.noise_window,
+                             stats_shm_name),
                        daemon=True)
     proc.start()
     print(f"[polar_loopback] 处理子进程 PID={proc.pid}")
@@ -565,8 +649,35 @@ def main():
     threading.Thread(target=tx_thread, daemon=True).start()
     print(f"[polar_loopback] {args.num_frames} frames  gap={args.frame_gap_ms}ms  "
           f"Polar(N=256,K=128) BPSK  "
-          f"PSS_thr=(ptm=3.5,pts=1.5)  RS_corr>0.3  "
+          f"PSS_thr=(ptm={args.pss_ptm},pts={args.pss_pts})  "
+          f"RS_corr>{args.rs_corr_thr}  "
+          f"STF_thr={args.stf_threshold}  STF_energy={args.stf_min_energy}  "
           f"dump_llr={'on' if args.dump_llr else 'off'}", flush=True)
+
+    # ── 保存元数据 JSON ──
+    if args.save_meta:
+        meta = {
+            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+            'freq_hz': args.freq,
+            'gain_tx_db': args.gain_tx,
+            'gain_rx_db': args.gain_rx,
+            'num_frames': args.num_frames,
+            'frame_gap_ms': args.frame_gap_ms,
+            'samp_rate': args.rate,
+            'sps': SPS,
+            'polar_n': N, 'polar_k': K,
+            'stf_threshold': args.stf_threshold,
+            'stf_min_energy': args.stf_min_energy,
+            'pss_ptm': args.pss_ptm,
+            'pss_pts': args.pss_pts,
+            'rs_corr_thr': args.rs_corr_thr,
+            'fine_cfo_max': args.fine_cfo_max,
+            'noise_window': args.noise_window,
+            'llr_clip': LLR_CLIP,
+        }
+        with open(args.save_meta, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        print(f"[polar_loopback] meta saved: {args.save_meta}", flush=True)
 
     # 等 TX 发完 + 子进程处理完
     tx_done.wait()
@@ -584,11 +695,32 @@ def main():
         print(f"[polar_loopback] LLR dump saved: {save_path}  "
               f"({args.num_frames} rows, each {dump_row_bytes}B)", flush=True)
 
+    # ── 保存 per-frame stats ──
+    if args.dump_stats and stats_shm is not None:
+        stats_row_bytes = 32 * 8
+        stats_arr = np.ndarray((args.num_frames, stats_row_bytes), dtype=np.uint8,
+                                buffer=stats_shm.buf)
+        # 转为 (num_frames, 32) float64
+        stats_f64 = stats_arr.view(np.float64).reshape(args.num_frames, 32)
+        cols = ['frame_id', 'ptm', 'pts', 'coarse_cfo', 'fine_cfo', 'total_cfo',
+                'hmag', 'snr_db', 'evm_db', 'sigma2', 'rs_corr',
+                'hdr_ok', 'info_errs'] + ['_reserved'] * 19
+        stats_json = []
+        for i in range(args.num_frames):
+            row = {cols[j]: stats_f64[i, j] for j in range(13)}
+            stats_json.append(row)
+        with open(args.dump_stats, 'w', encoding='utf-8') as f:
+            json.dump(stats_json, f, indent=2, ensure_ascii=False)
+        print(f"[polar_loopback] stats saved: {args.dump_stats}  "
+              f"({args.num_frames} frames)", flush=True)
+
     shm.close(); shm.unlink()
     tx_ts_shm.close(); tx_ts_shm.unlink()
     tx_info_shm.close(); tx_info_shm.unlink()
     if dump_shm:
         dump_shm.close(); dump_shm.unlink()
+    if stats_shm:
+        stats_shm.close(); stats_shm.unlink()
 
 
 if __name__ == '__main__':
