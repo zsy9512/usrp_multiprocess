@@ -1,6 +1,6 @@
 @echo off
 REM build_uhd_msvc.bat — 编译 UHD TX/RX (MSVC)
-REM 
+REM
 REM 前提: 1) VS2022 BuildTools 已安装
 REM       2) Boost 1.66 已解压到 E:\PhD_work\code\usrp_hardware\boost_1_66_0
 REM       3) 已执行: cd boost_1_66_0 && bootstrap.bat

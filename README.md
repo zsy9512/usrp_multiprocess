@@ -22,7 +22,12 @@
 ├── loopback_test.py       # 单 B210 loopback，主进程 UHD 收发，子进程 PHY 处理
 ├── hw_loopback.py         # 双 B210 TX/RX 硬件测试
 ├── test_phy_offline.py    # 离线测试矩阵：SNR、CFO、相偏、多径、定时、多帧
+├── sim_channel.py         # 独立仿真信道：AWGN、CFO、相偏、多径
 ├── burst_interferer.py    # B210 突发干扰源
+├── sync_config.py         # B210 时钟配置（host / external_ref）
+├── polar_encode.py        # Polar 编码器，stdout 管道输出码字
+├── polar_decode.py        # Polar 硬判/SGNN 译码器，stdin 管道输入 LLR
+├── sgnn_file_decode.py    # SGNN 译码器（从 .npy 文件直接读取 LLR）
 ├── tools/
 │   ├── iq_recorder.py     # 原始 IQ 录制
 │   ├── iq_analyzer.py     # IQ 幅度、频谱、STF 候选诊断
@@ -30,19 +35,24 @@
 │   ├── loopback_capture.py# loopback IQ + TX bits 采集
 │   └── loopback_analyze.py# loopback 逐帧同步、CRC、BER、绘图和参数扫描
 ├── cpp/
-│   ├── phy_dsp.h          # C++ 版 PHY DSP 公共实现
+│   ├── phy_dsp.h          # C++ 版 PHY DSP 公共实现（所有目标共用）
+│   ├── loopback.cpp       # C++ USRP loopback（对应 loopback_test.py）
 │   ├── tx_main.cpp        # 离线 C++ 发射端，输出 interleaved float32 IQ
 │   ├── rx_main.cpp        # 离线 C++ 接收端
-│   ├── uhd_tx_main.cpp    # UHD C++ 发射端
-│   ├── uhd_rx_main.cpp    # UHD C++ 接收端
+│   ├── uhd_tx_main.cpp    # UHD C++ 发射端（需 Boost）
+│   ├── uhd_rx_main.cpp    # UHD C++ 接收端（需 Boost）
+│   ├── build_loopback.bat # loopback.cpp / uhd_tx / uhd_rx MSVC 编译脚本
+│   ├── build_uhd_msvc.bat # uhd_tx/uhd_rx 专用 MSVC 编译脚本（旧版）
+│   ├── npy2bin.py         # .npy(complex64) → .bin 转换工具
+│   ├── Makefile           # Linux/MinGW 离线编译
 │   └── README.md          # C++ 编译环境和命令
 ├── deploy/
 │   ├── common.py          # Polar/SGNN 自包含部署工具
 │   ├── simulate.py        # Polar-SGNN 闭环仿真
 │   ├── matrices/          # Polar/LDPC 图结构矩阵
-│   └── checkpoint/        # SGNN 权重
-├── polar_encode.py        # Polar 编码器，stdout 管道输出码字
-└── polar_decode.py        # Polar 硬判/SGNN 译码器，stdin 管道输入 LLR
+│   └── checkpoint/        # SGNN 权重（需自行放置）
+├── burst_interferer_pkg/  # burst_interferer.py 依赖包
+└── capture/               # loopback 采集输出（gitignored）
 ```
 
 ## PHY 帧结构
@@ -243,6 +253,39 @@ tx.exe --random --num-frames 50 -o tx_iq.bin
 rx.exe tx_iq.bin
 ```
 
+### 6. C++ USRP loopback
+
+`cpp/loopback.cpp` 是 `loopback_test.py` 的 C++ 实现版本，在同一 B210 上自发自收。
+
+**编译**（使用 `build_loopback.bat`，已配好 VS2022 BuildTools + UHD + Boost 路径）：
+
+```powershell
+cd cpp
+build_loopback.bat
+```
+
+产物：`cpp/loopback_msvc.exe`
+
+**运行**（参数与 Python 版一致）：
+
+```powershell
+loopback_msvc.exe --args serial=320F33F --freq 915e6 --gain-tx 65 --gain-rx 64
+```
+
+主要参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--args` | (空) | UHD device args，如 `serial=320F33F` |
+| `--freq` | 915e6 | 中心频率 Hz |
+| `--gain-tx` | 65 | 发射增益 dB |
+| `--gain-rx` | 64 | 接收增益 dB |
+| `--rate` | 1e6 | 采样率 Hz |
+| `--rx-channel` | 0 | RX 通道索引 |
+| `--rx-antenna` | RX2 | RX 天线端口 |
+| `--num-frames` | 1000 | 发射帧数 |
+| `--frame-gap-ms` | 5.0 | 帧间隔 ms |
+
 `polar_encode.py` 和 `polar_decode.py` 提供了 Polar 码 stdin/stdout 管道接口。当前 `cpp/rx_main.cpp` 主要打印 PHY 同步和 CRC 统计；若要直接串接 `polar_decode.py`，接收端需要输出 `[4B frame_id][256 float32 LLR][1B crc_ok]` 格式的数据流。
 
 ```powershell
@@ -349,12 +392,17 @@ python tools/loopback_analyze.py capture/baseline --compare capture/int_sb20
 
 ## Polar/SGNN 相关
 
-`polar_encode.py` 和 `polar_decode.py` 保留了 stdin/stdout 管道接口，便于后续把 PHY 和 Polar/SGNN 译码链路连接起来。按当前代码，`deploy/simulate.py` 是更完整的 Polar-SGNN 闭环入口，用于在纯软件中评估 AWGN 或突发噪声下的 BER/FER。
+`polar_encode.py` 和 `polar_decode.py` 提供了 stdin/stdout 管道接口，便于把 PHY 和 Polar/SGNN 译码链路连接起来。`deploy/simulate.py` 是更完整的 Polar-SGNN 闭环入口，用于在纯软件中评估 AWGN 或突发噪声下的 BER/FER。
 
 ```powershell
-python deploy/simulate.py --checkpoint deploy/checkpoint/polar_GNN_20_iter_0_epoches_13.pt --ebn0-range 1.0,5.0,0.5 --frames 2000
-python deploy/simulate.py --checkpoint deploy/checkpoint/polar_GNN_20_iter_0_epoches_13.pt --ebn0 3.0 --sigma-b 2.0 --burst-prob 0.1 --frames 10000
+# 使用 deploy/simulate.py 做闭环仿真（需自行放置 checkpoint 到 deploy/checkpoint/）
+python deploy/simulate.py --checkpoint deploy/checkpoint/your_model.pt --ebn0-range 1.0,5.0,0.5 --frames 2000
+
+# PHY 离线收发 + Polar 编码管道
+python polar_encode.py --frames 100 --save-info info.npy | sender.py --mode stdin -o tx_iq.bin
 ```
+
+`sgnn_file_decode.py` 提供从 `.npy` 文件直接读取 LLR 并调用 SGNN 译码的快捷入口（适用于 conda 环境中已有 torch 的场景）。
 
 ## 推荐调试顺序
 

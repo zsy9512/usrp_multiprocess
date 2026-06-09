@@ -18,11 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phy_params import SPS, STF, PSS, RS, RRC, STF_LEN, PSS_LEN, RS_LEN
 from phy_params import HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN, STF_DELAY
 from phy_params import STF_THRESHOLD, STF_MIN_ENERGY
+from phy_params import MIN_WIN_SAMPLES
 from phy_params import crc16, crc16_check, bits_to_bytes, bytes_to_bits
 
 RING_CAP = 2_000_000
 SAMP_RATE = 1e6
-TS_SYM = SPS / SAMP_RATE           # 符号周期 (s) = 2e-6
 RRC_DELAY = (len(RRC) - 1) // 2    # 10 samples
 FRAME_RRC_SAMPLES = 496 * SPS + len(RRC) - 1  # 1012 samples
 
@@ -31,13 +31,15 @@ FRAME_RRC_SAMPLES = 496 * SPS + len(RRC) - 1  # 1012 samples
 # 子进程: PHY 处理 (从共享内存读, 随便多慢都不影响 USRP)
 # ===================================================================
 
-def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_name, tx_bits_shm_name):
+def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
+                 tx_ts_shm_name, tx_bits_shm_name, samp_rate):
     shm = shared_memory.SharedMemory(name=shm_name)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf)
     tx_ts_shm = shared_memory.SharedMemory(name=tx_ts_shm_name) if tx_ts_shm_name else None
     tx_ts = np.ndarray(num_frames, dtype=np.uint64, buffer=tx_ts_shm.buf) if tx_ts_shm else None
     tx_bits_shm = shared_memory.SharedMemory(name=tx_bits_shm_name) if tx_bits_shm_name else None
     tx_bits = np.ndarray((num_frames, PAYLOAD_LEN), dtype=np.int8, buffer=tx_bits_shm.buf) if tx_bits_shm else None
+    ts_sym = SPS / samp_rate
 
     # ------------------------------------------------------------------
     # ① STF 延迟相关 + 粗 CFO + 峰值聚类
@@ -74,7 +76,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
                 used.add(dx)
             peaks.append(d)
             phase = np.angle(p)
-            cfos.append(-phase / (2 * np.pi * L / SAMP_RATE))
+            cfos.append(-phase / (2 * np.pi * L / samp_rate))
         return peaks, cfos
 
     # ------------------------------------------------------------------
@@ -114,26 +116,27 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
         n_rs = np.arange(RS_LEN)
 
         # 粗 CFO 预补偿 → 残余小频偏上用线性拟合
-        if abs(coarse_cfo) > 1.0:
-            pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * TS_SYM)
+        if abs(coarse_cfo) > 0.0:
+            pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * ts_sym)
             rs_seg = rs_seg * pre_comp
 
         # 细 CFO: unwrap 相位 → 线性回归斜率
         rs_tone = rs_seg * np.conj(RS)
+        rs_corr = float(np.abs(np.sum(rs_tone)))
         rs_phase = np.unwrap(np.angle(rs_tone))
         n = np.arange(RS_LEN, dtype=np.float64)
         n_mean = np.mean(n); p_mean = np.mean(rs_phase)
         num = np.sum((n - n_mean) * (rs_phase - p_mean))
         den = np.sum((n - n_mean) ** 2)
         slope = num / (den + 1e-30)
-        fine_cfo = slope / (2 * np.pi * TS_SYM)
+        fine_cfo = slope / (2 * np.pi * ts_sym)
 
         # 细 CFO 超限 → PSS 定时错误, 拒收
         if abs(fine_cfo) > 500: return None
 
         # 总 CFO 补偿 + 信道估计
         total_cfo = coarse_cfo + fine_cfo
-        total_comp = np.exp(-1j * 2 * np.pi * total_cfo * (rs_pos + n_rs) * TS_SYM)
+        total_comp = np.exp(-1j * 2 * np.pi * total_cfo * (rs_pos + n_rs) * ts_sym)
         rs_corrected = symbols[rs_pos:rs_pos + RS_LEN] * total_comp
 
         h = np.mean(rs_corrected * np.conj(RS))
@@ -141,10 +144,9 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
 
         # Welch 校正噪声方差
         noise = rs_corrected / h - RS
-        s2 = max(float(np.var(noise)) * RS_LEN / (RS_LEN - 1), 1e-30)
+        s2 = max(float(np.sum(np.abs(noise) ** 2) / (RS_LEN - 1)), 1e-30)
 
         # RS 相关质量门限: 平均每符号相关性 > 0.3
-        rs_corr = float(np.abs(np.sum(rs_corrected * np.conj(RS))))
         if rs_corr < RS_LEN * 0.3: return None
 
         return {'h': h, 'phase_est': float(np.angle(h)), 'sigma2': s2,
@@ -160,7 +162,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
         seg = symbols[data_start:data_start + data_len]
         n = np.arange(data_len)
         total_cfo = chan['total_cfo']
-        cfo_comp = np.exp(-1j * 2 * np.pi * total_cfo * (data_start + n) * TS_SYM)
+        cfo_comp = np.exp(-1j * 2 * np.pi * total_cfo * (data_start + n) * ts_sym)
         y = seg * cfo_comp
         h = chan['h']
         if abs(h) > 1e-30: y = y / h
@@ -203,7 +205,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
             s = min(n, len(buf) - buf_len)
             buf[buf_len:buf_len + s] = c[:s]; buf_len += s
 
-            while buf_len >= 2000:
+            while buf_len >= MIN_WIN_SAMPLES:
                 ws = max(0, buf_len - 5000)
                 r = buf[ws:buf_len]
                 peaks, cfos = _stf_detect(r)
@@ -215,6 +217,8 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames, tx_ts_shm_na
                 found = False
                 for pi, d in enumerate(peaks[:8]):      # 最多尝试 8 个聚类峰
                     coarse_cfo = cfos[pi]
+                    if abs(coarse_cfo) > 2000.0:
+                        continue
                     coarse = ws + d
 
                     # 提取窗口: STF 前 200 + 整帧 + 后 200 样本裕量
@@ -326,6 +330,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--serial', default='320F33F')
     p.add_argument('--freq', type=float, default=915e6)
+    p.add_argument('--rate', type=float, default=SAMP_RATE)
     p.add_argument('--gain-tx', type=float, default=65)
     p.add_argument('--gain-rx', type=float, default=64)
     p.add_argument('--rx-channel', type=int, default=0,
@@ -341,12 +346,12 @@ def main():
     dev = f'serial={args.serial}' if args.serial else ''
     usrp = uhd.usrp.MultiUSRP(dev)
     usrp.set_tx_freq(uhd.types.TuneRequest(args.freq)); usrp.set_tx_gain(args.gain_tx)
-    usrp.set_tx_rate(SAMP_RATE); usrp.set_tx_bandwidth(SAMP_RATE)
+    usrp.set_tx_rate(args.rate); usrp.set_tx_bandwidth(args.rate)
     usrp.set_tx_antenna("TX/RX")
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq), args.rx_channel)
     usrp.set_rx_gain(args.gain_rx, args.rx_channel)
-    usrp.set_rx_rate(SAMP_RATE, args.rx_channel)
-    usrp.set_rx_bandwidth(SAMP_RATE, args.rx_channel)
+    usrp.set_rx_rate(args.rate, args.rx_channel)
+    usrp.set_rx_bandwidth(args.rate, args.rx_channel)
     usrp.set_rx_antenna(args.rx_antenna, args.rx_channel)
     usrp.set_clock_source("internal"); usrp.set_time_source("internal")
     ns = time.time_ns()
@@ -376,7 +381,7 @@ def main():
 
     proc = ctx.Process(target=_proc_worker,
                        args=(shm.name, wr_count, has_data, running, args.num_frames,
-                             tx_ts_shm.name, tx_bits_shm.name),
+                             tx_ts_shm.name, tx_bits_shm.name, args.rate),
                        daemon=True)
     proc.start()
     print(f"[loopback] 处理子进程 PID={proc.pid}")
@@ -399,15 +404,23 @@ def main():
     time.sleep(1)
 
     # ── TX 线程 ──
-    gap = max(16, int(args.frame_gap_ms * SAMP_RATE / 1000))
+    gap = max(16, int(args.frame_gap_ms * args.rate / 1000))
     tx_done = threading.Event()
 
     def tx_thread():
         from sender import build_frame, rrc_filter
         md = uhd.types.TXMetadata(); md.start_of_burst = True
+        rng_state = 42
+
+        def next_bit():
+            nonlocal rng_state
+            rng_state = (rng_state * 1664525 + 1013904223) & 0xFFFFFFFF
+            return (rng_state >> 31) & 1
+
         for f in range(args.num_frames):
             tx_ts[f] = time.time_ns()
-            raw = np.random.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
+            raw = np.fromiter((next_bit() for _ in range(PAYLOAD_LEN)),
+                              dtype=np.int64, count=PAYLOAD_LEN)
             tx_bits_arr[f] = raw.astype(np.int8)
             iq = rrc_filter(build_frame(raw, f), RRC, SPS)
             tx.send(iq.astype(np.complex64), md); md.start_of_burst = False

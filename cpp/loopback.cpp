@@ -26,6 +26,7 @@ static constexpr int RING_CAP = 2'000'000;
 
 struct SharedRing : public RingBuf {
     std::atomic<size_t> wr_count{0};
+    std::atomic<size_t> skip_to{0};   // main thread signals proc_th to discard old data
 
     SharedRing() { init(RING_CAP); }
 
@@ -60,6 +61,7 @@ struct SharedRing : public RingBuf {
 struct PhyStats {
     int total = 0, hdr_ok = 0, crc_ok = 0, false_alarms = 0;
     int64_t total_lat_us = 0;
+    int lat_count = 0;  // number of valid latency measurements
 };
 
 struct FrameResult {
@@ -125,6 +127,14 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
     size_t rd_count = 0;
 
     while (running.load(std::memory_order_relaxed)) {
+        // Check for main thread flush request (skip accumulated noise backlog)
+        size_t skip = ring.skip_to.load(std::memory_order_acquire);
+        if (skip > 0) {
+            if (skip > rd_count) rd_count = skip;
+            ring.skip_to.store(0, std::memory_order_release);
+            buf_len = 0;   // also clear local processing buffer
+        }
+
         // Check for new data
         size_t wc = ring.wr_count.load(std::memory_order_acquire);
         if (wc <= rd_count) {
@@ -233,25 +243,29 @@ static void process_loop(SharedRing& ring, std::atomic<bool>& running, float sam
 
                 uint16_t fid = 0;
                 for (int i = 0; i < 16; i++) fid = (uint16_t)((fid << 1) | (hdrBits[i] & 1));
-                {
-                    std::lock_guard<std::mutex> lk(g_result_mtx);
-                    g_results.push_back({(int)fid, es + fs * SPS,
-                                         std::vector<int>(payloadBits)});
-                }
 
                 float hmag = std::abs(h);
                 float snrDb = 10.0f * std::log10(std::max(hmag * hmag / sigma2, 1e-30f));
 
-                // accumulate latency every frame
-                if (fid < g_tx_ts.size()) {
-                    auto now = std::chrono::steady_clock::now();
-                    int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
-                        now - g_tx_ts[fid]).count();
-                    g_stats.total_lat_us += lat;
+                // Only accumulate latency / BER for frames with valid header
+                int64_t avg_lat = 0;
+                if (hdrOk) {
+                    {
+                        std::lock_guard<std::mutex> lk(g_result_mtx);
+                        g_results.push_back({(int)fid, es + fs * SPS,
+                                             std::vector<int>(payloadBits)});
+                    }
+                    if (fid < g_tx_ts.size()) {
+                        auto now = std::chrono::steady_clock::now();
+                        int64_t lat = std::chrono::duration_cast<std::chrono::microseconds>(
+                            now - g_tx_ts[fid]).count();
+                        g_stats.total_lat_us += lat;
+                        g_stats.lat_count++;
+                        avg_lat = g_stats.total_lat_us / g_stats.lat_count;
+                    }
                 }
 
                 if (g_stats.total <= 5 || g_stats.total % 100 == 0) {
-                    int64_t avg_lat = g_stats.total_lat_us / g_stats.total;
                     print_frame(g_stats.total, snrDb, avg_lat, hdrOk, payCrcOk);
                 }
 
@@ -311,14 +325,17 @@ static void tx_thread_func(uhd::tx_streamer::sptr tx_stream,
     md.start_of_burst = true;
     md.end_of_burst = false;
 
-    // Use fixed seed for reproducibility
-    srand(42);
+    uint32_t rng_state = 42u;
+    auto next_bit = [&rng_state]() -> int {
+        rng_state = rng_state * 1664525u + 1013904223u;
+        return (rng_state >> 31) & 1u;
+    };
     g_tx_bits.resize(num_frames);
     g_tx_ts.resize(num_frames);
 
     for (int f = 0; f < num_frames && running.load(std::memory_order_relaxed); f++) {
         std::vector<int> bits(PAYLOAD_LEN);
-        for (int i = 0; i < PAYLOAD_LEN; i++) bits[i] = rand() & 1;
+        for (int i = 0; i < PAYLOAD_LEN; i++) bits[i] = next_bit();
         g_tx_bits[f] = bits;
         g_tx_ts[f] = std::chrono::steady_clock::now();
 
@@ -352,7 +369,9 @@ int main(int argc, char* argv[]) {
     double freq = 915e6, tx_gain = 65.0, rx_gain = 64.0;
     double rate = 1e6, frame_gap_ms = 5.0;
     int num_frames = 1000;
+    int rx_channel = 0;
     std::string args_str;
+    std::string rx_antenna = "RX2";
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -360,11 +379,14 @@ int main(int argc, char* argv[]) {
         else if (a == "--gain-tx" && i+1<argc) tx_gain = atof(argv[++i]);
         else if (a == "--gain-rx" && i+1<argc) rx_gain = atof(argv[++i]);
         else if (a == "--rate" && i+1<argc) rate = atof(argv[++i]);
+        else if (a == "--rx-channel" && i+1<argc) rx_channel = atoi(argv[++i]);
+        else if (a == "--rx-antenna" && i+1<argc) rx_antenna = argv[++i];
         else if (a == "--num-frames" && i+1<argc) num_frames = atoi(argv[++i]);
         else if (a == "--frame-gap-ms" && i+1<argc) frame_gap_ms = atof(argv[++i]);
         else if (a == "--args" && i+1<argc) args_str = argv[++i];
         else if (a == "-h" || a == "--help") {
-            printf("Usage: loopback_msvc [--freq 915e6] [--gain-tx 65] [--gain-rx 64] [--num-frames 1000]\n");
+            printf("Usage: loopback_msvc [--freq 915e6] [--gain-tx 65] [--gain-rx 64] [--rate 1e6]\n"
+                   "                    [--rx-channel 0] [--rx-antenna RX2] [--num-frames 1000]\n");
             return 0;
         }
     }
@@ -372,8 +394,9 @@ int main(int argc, char* argv[]) {
     g_ts = 1.0f / (float)rate;
     g_ts_sym = (float)SPS / (float)rate;
 
-    printf("[loopback] rate=%.0f freq=%.3fMHz tx_gain=%.0f rx_gain=%.0f frames=%d\n",
-           rate, freq/1e6, tx_gain, rx_gain, num_frames);
+    printf("[loopback] rate=%.0f freq=%.3fMHz tx_gain=%.0f rx_gain=%.0f "
+           "rx_channel=%d rx_ant=%s frames=%d\n",
+           rate, freq/1e6, tx_gain, rx_gain, rx_channel, rx_antenna.c_str(), num_frames);
 
     // --- USRP ---
     auto usrp = uhd::usrp::multi_usrp::make(args_str);
@@ -384,11 +407,11 @@ int main(int argc, char* argv[]) {
     usrp->set_tx_bandwidth(rate);
     usrp->set_tx_antenna("TX/RX");
 
-    usrp->set_rx_freq(uhd::tune_request_t(freq));
-    usrp->set_rx_gain(rx_gain);
-    usrp->set_rx_rate(rate);
-    usrp->set_rx_bandwidth(rate);
-    usrp->set_rx_antenna("RX2");
+    usrp->set_rx_freq(uhd::tune_request_t(freq), rx_channel);
+    usrp->set_rx_gain(rx_gain, rx_channel);
+    usrp->set_rx_rate(rate, rx_channel);
+    usrp->set_rx_bandwidth(rate, rx_channel);
+    usrp->set_rx_antenna(rx_antenna, rx_channel);
 
     usrp->set_clock_source("internal");
     usrp->set_time_source("internal");
@@ -402,7 +425,7 @@ int main(int argc, char* argv[]) {
     auto tx_stream = usrp->get_tx_stream(tx_args);
 
     uhd::stream_args_t rx_args("fc32", "sc16");
-    rx_args.channels = {0};
+    rx_args.channels = {(size_t)rx_channel};
     auto rx_stream = usrp->get_rx_stream(rx_args);
     rx_stream->issue_stream_cmd(uhd::stream_cmd_t(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS));
 
@@ -413,11 +436,20 @@ int main(int argc, char* argv[]) {
 
     std::thread rx_th(rx_thread_func, rx_stream, std::ref(ring),
                       std::ref(running), std::ref(overflow_count));
+
+    // Start processing thread BEFORE TX so it consumes noise samples
+    // during the 1-second settling period, avoiding backlog when TX starts.
+    std::thread proc_th(process_loop, std::ref(ring), std::ref(running), (float)rate);
+
     std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Flush any accumulated noise backlog from the ring buffer,
+    // so proc_th starts fresh from TX data.
+    ring.skip_to.store(ring.wr_count.load(std::memory_order_acquire),
+                       std::memory_order_release);
 
     int gap_len = std::max(16, (int)(frame_gap_ms * rate / 1000.0));
     std::thread tx_th(tx_thread_func, tx_stream, num_frames, gap_len, std::ref(running));
-    std::thread proc_th(process_loop, std::ref(ring), std::ref(running), (float)rate);
 
     printf("[loopback] TX started, %d frames  gap=%.1fms  "
            "PSS thr=(ptm=%.1f,pts=%.1f)\n",
