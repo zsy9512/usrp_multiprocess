@@ -99,9 +99,10 @@ def _bpsk_demod_llr(symbols, data_start, data_len, h, total_cfo, sigma2):
 
 
 def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
-                   sgnn_device='cpu'):
+                   sgnn_device='cpu', oracle_llr=False):
     """离线解码一个 capture.
 
+    oracle_llr=True: 用全帧已知波形估计 h, sigma2=noise_floor, 得到理想 LLR 参考。
     Returns dict with per_frame BER and summary.
     """
     iq_path = prefix + '_iq.npy'
@@ -113,6 +114,11 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
 
     iq = np.load(iq_path)
     n_total = len(iq)
+    # 前缀底噪
+    n_nf = min(50000, n_total)
+    nf_syms = np.convolve(iq[:n_nf], RRC[::-1], mode='full')[RRC_DELAY_SAMPLES::SPS]
+    noise_floor = float(np.var(nf_syms))
+
     meta = {}
     if os.path.isfile(meta_path):
         with open(meta_path, encoding='utf-8') as f:
@@ -175,6 +181,8 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
     ber_errs, ber_total = 0, 0
     bpsk_errs, bpsk_total = 0, 0
     sgnn_errs, sgnn_total = 0, 0
+    bpsk_ora_errs, bpsk_ora_total = 0, 0  # oracle LLR 参考
+    sgnn_ora_errs, sgnn_ora_total = 0, 0
     mean_llr_vals = []
     first_decoded = True
     rng2 = np.random.RandomState(42)
@@ -289,6 +297,46 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
                 sgnn_errs += int(np.sum(info_sgnn != ref_info))
                 sgnn_total += K_POLAR
 
+            # ---- Oracle LLR: 全帧 LS, sigma2=noise_floor ----
+            if oracle_llr:
+                # 用当前帧位置提取全帧符号
+                # actual offset = es + fs*SPS (frame start in IQ chunk → global IQ)
+                frame_iq_start = es + fs * SPS
+                if frame_iq_start >= 0 and frame_iq_start + frame_iq_len <= n_total:
+                    fiq = iq[frame_iq_start:frame_iq_start + frame_iq_len]
+                    fsyms = np.convolve(fiq, RRC[::-1], mode='full')[RRC_DELAY_SAMPLES::SPS].astype(np.complex64)
+                    tx_ref_ora = _reconstruct_frame_v2(
+                        (rng2.rand(K_POLAR) < 0.5).astype(np.int64), gi)
+                    # 全帧 LS (前 stf_len+s+pss_len+rs_len+HEADER_LEN+N_POLAR 非零符号)
+                    n_ref = min(len(fsyms), len(tx_ref_ora) // SPS)
+                    if n_ref >= 100:
+                        tx_syms_ora = np.convolve(tx_ref_ora, RRC[::-1], mode='full')[RRC_DELAY_SAMPLES::SPS].astype(np.complex64)
+                        n_valid = min(n_ref, len(tx_syms_ora))
+                        mask_ora = np.abs(tx_syms_ora[:n_valid]) > 0.01
+                        if np.sum(mask_ora) > 20:
+                            h_ora = np.sum(fsyms[:n_valid][mask_ora] * np.conj(tx_syms_ora[:n_valid][mask_ora])) / np.sum(np.abs(tx_syms_ora[:n_valid][mask_ora])**2)
+                            # Oracle LLR
+                            seg_ora = syms[pay_start:pay_start + N_POLAR]
+                            n_arr_ora = np.arange(N_POLAR)
+                            y_ora = seg_ora / h_ora if abs(h_ora) > 1e-30 else seg_ora
+                            nf_for_llr = max(noise_floor, 1e-9)
+                            llr_ora = np.clip(4.0 * y_ora.real / nf_for_llr, -LLR_CLIP, LLR_CLIP).astype(np.float32)
+                            bpsk_ora = (llr_ora < 0).astype(np.int64)
+                            if tx_coded_bits is not None and gi < len(tx_coded_bits):
+                                bpsk_ora_errs += int(np.sum(bpsk_ora != tx_coded_bits[gi]))
+                                bpsk_ora_total += N_POLAR
+                            if sgnn_model is not None and tx_info is not None and gi < len(tx_info):
+                                v_ora = np.zeros((1, sgnn_graph['N_hat'], 1), dtype=np.float32)
+                                v_ora[0, -N_POLAR:, 0] = llr_ora
+                                vt_ora = torch.from_numpy(v_ora).to(sgnn_device)
+                                with torch.no_grad():
+                                    out_ora = sgnn_model(vt_ora, sgnn_graph['template_f'].unsqueeze(0),
+                                                        sgnn_graph['edge_index'], sgnn_graph['edge_index_rev'])
+                                sgnn_bits_ora = (out_ora[-1][0, -N_POLAR:, 0].cpu().numpy() < 0).astype(np.int64)
+                                info_ora = _polar_encode(sgnn_bits_ora)[FROZEN_MASK.astype(bool)]
+                                sgnn_ora_errs += int(np.sum(info_ora != tx_info[gi]))
+                                sgnn_ora_total += K_POLAR
+
             # 第一帧诊断
             if first_decoded:
                 first_decoded = False
@@ -324,6 +372,8 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
     n_decoded = sum(1 for f in per_frame if f['decoded'])
     bpsk_ber = bpsk_errs / max(bpsk_total, 1)
     sgnn_ber = sgnn_errs / max(sgnn_total, 1) if sgnn_total > 0 else 0
+    bpsk_ora_ber = bpsk_ora_errs / max(bpsk_ora_total, 1) if bpsk_ora_total > 0 else None
+    sgnn_ora_ber = sgnn_ora_errs / max(sgnn_ora_total, 1) if sgnn_ora_total > 0 else None
     mean_abs_llr = float(np.mean(mean_llr_vals)) if mean_llr_vals else 0
     summary = {
         'n_frames': num_frames,
@@ -332,20 +382,36 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
         'polar_ber': ber_errs / max(ber_total, 1),
         'bpsk_ber': bpsk_ber,
         'sgnn_ber': sgnn_ber,
+        'bpsk_ora_ber': bpsk_ora_ber,
+        'sgnn_ora_ber': sgnn_ora_ber,
         'info_errs_total': ber_errs,
         'info_bits_total': ber_total,
         'bpsk_errs_total': bpsk_errs,
         'bpsk_bits_total': bpsk_total,
         'sgnn_errs_total': sgnn_errs,
         'sgnn_bits_total': sgnn_total,
+        'bpsk_ora_errs_total': bpsk_ora_errs,
+        'bpsk_ora_bits_total': bpsk_ora_total,
+        'sgnn_ora_errs_total': sgnn_ora_errs,
+        'sgnn_ora_bits_total': sgnn_ora_total,
         'mean_abs_llr': mean_abs_llr,
     }
 
     sgnn_str = f" SGNN_BER={sgnn_ber*100:.2f}%" if sgnn_total > 0 else ""
+    ora_str = ""
+    if bpsk_ora_ber is not None:
+        ora_str = f" BPSK_ora={bpsk_ora_ber:.1e} SGNN_ora={sgnn_ora_ber or 0:.1e}"
     print(f"  译码: {n_decoded}/{num_frames} ({summary['decode_rate']*100:.1f}%)  "
           f"BPSK_BER={bpsk_ber*100:.2f}%  Polar_BER={summary['polar_ber']*100:.2f}%"
-          f"{sgnn_str}  mean|LLR|={mean_abs_llr:.2f}")
+          f"{sgnn_str}{ora_str}  mean|LLR|={mean_abs_llr:.2f}")
     return {'summary': summary, 'per_frame': per_frame}
+
+
+def _fmt_ber(val):
+    """BER 科学计数法显示."""
+    if val is None or val == 0:
+        return "      0"
+    return f"{val:7.1e}"
 
 
 def main():
@@ -354,6 +420,8 @@ def main():
     p.add_argument('--gain', type=int, default=0, help='只分析指定 gain')
     p.add_argument('--num-frames', type=int, default=100)
     p.add_argument('--sgnn', action='store_true', help='启用 SGNN 译码 (需要 torch)')
+    p.add_argument('--oracle-llr', action='store_true',
+                   help='Oracle LLR 参考: 全帧已知 h, sigma2=noise_floor')
     p.add_argument('--device', default='cpu', help='SGNN 设备 (cpu/cuda)')
     p.add_argument('-o', '--output', default='', help='输出 JSON')
     args = p.parse_args()
@@ -396,7 +464,7 @@ def main():
         print(f"\n-- {tag} --")
         r = decode_capture(pfx, num_frames=args.num_frames,
                             sgnn_model=sgnn_model, sgnn_graph=sgnn_graph,
-                            sgnn_device=args.device)
+                            sgnn_device=args.device, oracle_llr=args.oracle_llr)
         if 'error' in r:
             print(f"  错误: {r['error']}")
             continue
@@ -404,24 +472,31 @@ def main():
 
     if all_results:
         has_sgnn = any(r['summary'].get('sgnn_bits_total', 0) > 0 for r in all_results.values())
-        print(f"\n{'='*60}")
+        has_ora  = any(r['summary'].get('bpsk_ora_ber') is not None for r in all_results.values())
+        print(f"\n{'='*80}")
         print(f"  汇总")
-        if has_sgnn:
-            print(f"  {'capture':>25s}  {'decode':>7s}  {'BPSK':>7s}  {'Hard':>7s}  {'SGNN':>7s}  {'|LLR|':>6s}")
+        header = f"  {'capture':>25s}  {'decode':>7s}"
+        if has_ora:
+            header += f"  {'BPSK(盲)':>9s}  {'SGNN(盲)':>9s}  {'BPSK(ora)':>9s}  {'SGNN(ora)':>9s}"
+        elif has_sgnn:
+            header += f"  {'BPSK':>9s}  {'Hard':>9s}  {'SGNN':>9s}"
         else:
-            print(f"  {'capture':>25s}  {'decode':>7s}  {'BPSK_BER':>8s}  {'Polar_BER':>8s}  {'mean|LLR|':>10s}")
-        print(f"  {'-'*60}")
+            header += f"  {'BPSK':>9s}  {'Hard':>9s}"
+        header += f"  {'|LLR|':>6s}"
+        print(header)
+        print(f"  {'-'*85}")
         for tag, r in sorted(all_results.items()):
             s = r['summary']
-            if has_sgnn:
-                print(f"  {tag:>25s}  {s['n_decoded']:4d}/{s['n_frames']:<4d}  "
-                      f"{s['bpsk_ber']*100:6.2f}%  {s['polar_ber']*100:6.2f}%  "
-                      f"{s['sgnn_ber']*100:6.2f}%  {s['mean_abs_llr']:5.2f}")
+            line = f"  {tag:>25s}  {s['n_decoded']:4d}/{s['n_frames']:<4d}"
+            if has_ora:
+                line += f"  {_fmt_ber(s['bpsk_ber'])}  {_fmt_ber(s.get('sgnn_ber'))}  {_fmt_ber(s['bpsk_ora_ber'])}  {_fmt_ber(s.get('sgnn_ora_ber'))}"
+            elif has_sgnn:
+                line += f"  {_fmt_ber(s['bpsk_ber'])}  {_fmt_ber(s['polar_ber'])}  {_fmt_ber(s.get('sgnn_ber'))}"
             else:
-                print(f"  {tag:>25s}  {s['n_decoded']:4d}/{s['n_frames']:<4d}  "
-                      f"{s['bpsk_ber']*100:7.2f}%  {s['polar_ber']*100:7.2f}%  "
-                      f"{s['mean_abs_llr']:9.2f}")
-        print(f"{'='*60}")
+                line += f"  {_fmt_ber(s['bpsk_ber'])}  {_fmt_ber(s['polar_ber'])}"
+            line += f"  {s['mean_abs_llr']:5.2f}"
+            print(line)
+        print(f"{'='*80}")
 
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
