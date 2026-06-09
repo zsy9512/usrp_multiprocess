@@ -4,17 +4,27 @@ __pycache__/
 .qwen/
 .vscode/
 
+# Build artifacts
 *.obj
 *.exe
+*.bin
 *.dll
 *.lib
 *.a
+*.o
+*.out
+*.log
 
+# Data / output files
 *.npy
 *.npz
 *.pt
 *.pth
 *.tar.gz
 *.zip
+*.png
+*.jpg
+*.jpeg
 
 capture/
+deploy/checkpoint/
