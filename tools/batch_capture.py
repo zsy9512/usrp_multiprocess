@@ -83,8 +83,7 @@ def main():
 
     BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     CAPTURE_SCRIPT = os.path.join(BASE, "tools", "loopback_capture.py")
-    ANALYZE_SCRIPT = os.path.join(BASE, "tools", "loopback_analyze.py")
-    VERIFY_SCRIPT  = os.path.join(BASE, "tools", "verify_calibration.py")
+    ANALYZE_SCRIPT = os.path.join(BASE, "tools", "analyze_repeat_capture.py")
 
     results = []
     t_start = time.time()
@@ -128,37 +127,35 @@ def main():
             iq_size_mb = os.path.getsize(iq_path) / 1e6 if not args.dry_run else 0
             print(f"  [OK] {tag}_iq.npy  ({iq_size_mb:.1f} MB)")
 
-            # -- 步骤 2: 离线分析 --
+            # -- 步骤 2: 分析 (any-of-5 检出, 适配 5x 重复帧) --
             if not args.skip_analyze:
                 stats_json = prefix + "_stats.json"
                 cmd2 = [
-                    sys.executable, VERIFY_SCRIPT,
-                    prefix,
-                    "--ptm", "3.5", "--pts", "1.5",
+                    sys.executable, ANALYZE_SCRIPT,
+                    os.path.dirname(prefix),  # input dir
+                    "--gain", str(gain),
+                    "--num-frames", str(args.num_frames),
                     "-o", stats_json,
                 ]
                 rc2, stdout2, stderr2 = run_cmd(cmd2, dry_run=args.dry_run)
 
-                # 解析 stats 提取关键指标 (以文件存在为准, 不依赖返回码)
                 if not args.dry_run and os.path.isfile(stats_json):
-                    with open(stats_json) as f:
+                    with open(stats_json, encoding='utf-8') as f:
                         stats = json.load(f)
+                    gain_str = str(gain)
+                    gs = stats.get(gain_str, {})
                     results.append({
                         "tag": tag, "gain_rx": gain, "run": run_idx,
                         "capture_ok": True,
-                        "n_frames": stats.get("n_frames", 0),
-                        "snr_prefix_mean": stats.get("snr_prefix_mean"),
-                        "snr_rs_mean": stats.get("snr_rs_mean"),
-                        "cfo_mean": stats.get("cfo_mean"),
-                        "cfo_std": stats.get("cfo_std"),
-                        "crc_ok_rate": stats.get("crc_ok_rate"),
-                        "hdr_ok_rate": stats.get("hdr_ok_rate"),
+                        "groups_ok": gs.get("groups_ok", 0),
+                        "total_groups": gs.get("total_groups", 0),
+                        "detection_rate": gs.get("detection_rate", 0),
+                        "mean_hits": gs.get("mean_hits", 0),
                     })
-                    nf = stats.get('n_frames', 0)
-                    snr = stats.get('snr_prefix_mean')
-                    crc = stats.get('crc_ok_rate', 0)
-                    snr_str = f'{snr:.1f}' if snr is not None else 'N/A'
-                    print(f"    detected={nf}  SNR={snr_str}dB  CRC={crc*100:.0f}%")
+                    dr = gs.get('detection_rate', 0)
+                    hits = gs.get('mean_hits', 0)
+                    print(f"    groups={gs.get('groups_ok',0)}/{gs.get('total_groups',0)} "
+                          f"({dr*100:.0f}%)  hits={hits:.1f}/5")
                 else:
                     results.append({"tag": tag, "gain_rx": gain, "run": run_idx,
                                     "capture_ok": True, "analyze_ok": False})
@@ -191,19 +188,18 @@ def main():
 
     # Summary table
     if results:
-        header = f"  {'gain':>5s}  {'run':>3s}  {'det':>5s}  {'SNR(dB)':>8s}  {'CRC%':>6s}  {'CFO(Hz)':>12s}"
+        header = f"  {'gain':>5s}  {'groups':>8s}  {'rate':>7s}  {'hits':>6s}"
         print(f"\n{header}")
-        print(f"  {'-'*50}")
+        print(f"  {'-'*35}")
         for r in results:
-            nf = r.get("n_frames", 0)
-            snr_val = r.get("snr_prefix_mean")
-            crc_val = r.get("crc_ok_rate")
-            cfo_val = r.get("cfo_mean")
-            nf_str = str(nf) if nf else 'N/A'
-            snr_str = f'{snr_val:.1f}' if snr_val is not None else 'N/A'
-            crc_str = f'{crc_val*100:.0f}' if crc_val is not None else 'N/A'
-            cfo_str = f'{cfo_val:+.0f}' if cfo_val is not None else 'N/A'
-            print(f"  {r['gain_rx']:5d}  {r['run']:3d}  {nf_str:>5s}  {snr_str:>8s}  {crc_str:>6s}  {cfo_str:>12s}")
+            go = r.get("groups_ok", 0)
+            tg = r.get("total_groups", 0)
+            dr = r.get("detection_rate", 0)
+            mh = r.get("mean_hits", 0)
+            go_str = f'{go}/{tg}' if tg > 0 else 'N/A'
+            dr_str = f'{dr*100:.0f}%' if tg > 0 else 'N/A'
+            mh_str = f'{mh:.1f}/5' if tg > 0 else 'N/A'
+            print(f"  {r['gain_rx']:5d}  {go_str:>8s}  {dr_str:>7s}  {mh_str:>5s}")
 
 
 if __name__ == "__main__":

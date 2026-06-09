@@ -115,7 +115,7 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0):
 
     # 全帧互相关找第一帧
     tx_rev = np.conj(tx_iq_ref[::-1])
-    corr = np.abs(np.convolve(iq[:min(200000, n_total)], tx_rev, mode='valid'))
+    corr = np.abs(np.convolve(iq[:min(2000000, n_total)], tx_rev, mode='valid'))
     first_offset = int(np.argmax(corr))
     print(f"    第一帧 @ IQ[{first_offset}], corr_peak={corr[first_offset]:.1f}")
 

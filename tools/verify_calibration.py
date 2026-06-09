@@ -182,35 +182,42 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
 
     # -- Export --
     if output:
+        def _safe(v):
+            """Convert to float, replacing NaN/Inf with null for JSON."""
+            if v is None: return None
+            fv = float(v)
+            if np.isnan(fv) or np.isinf(fv): return None
+            return fv
+
         export = {
             'prefix': prefix,
             'noise_floor': noise_floor,
             'n_frames': n,
             'hdr_ok_rate': hdr_ok / max(n, 1),
             'crc_ok_rate': crc_ok / max(n, 1),
-            'snr_prefix_mean': float(np.mean(snr_prefix)),
-            'snr_prefix_std': float(np.std(snr_prefix)),
-            'snr_rs_mean': float(np.mean(snr_rs)),
-            'snr_rs_std': float(np.std(snr_rs)),
-            'cfo_mean': float(np.mean(cfos)),
-            'cfo_std': float(np.std(cfos)),
-            'ptm_mean': float(np.mean(ptms)),
-            'ptm_std': float(np.std(ptms)),
-            'pts_mean': float(np.mean(ptss)),
-            'pts_std': float(np.std(ptss)),
+            'snr_prefix_mean': _safe(np.mean(snr_prefix)),
+            'snr_prefix_std': _safe(np.std(snr_prefix)),
+            'snr_rs_mean': _safe(np.mean(snr_rs)),
+            'snr_rs_std': _safe(np.std(snr_rs)),
+            'cfo_mean': _safe(np.mean(cfos)),
+            'cfo_std': _safe(np.std(cfos)),
+            'ptm_mean': _safe(np.mean(ptms)),
+            'ptm_std': _safe(np.std(ptms)),
+            'pts_mean': _safe(np.mean(ptss)),
+            'pts_std': _safe(np.std(ptss)),
             'per_frame': [
                 {
                     'idx': f['idx'],
                     'frame_id': f['frame_id'],
-                    'snr_prefix': f['snr_prefix'],
-                    'snr_rs': f['snr_rs'],
-                    'snr_gap': f.get('snr_gap'),
-                    'total_cfo': f['total_cfo'],
-                    'ptm': f['ptm'],
-                    'pts': f['pts'],
-                    'rs_corr': f['rs_corr'],
-                    'sigma2': f['sigma2'],
-                    'evm_db': f['evm_db'],
+                    'snr_prefix': _safe(f['snr_prefix']),
+                    'snr_rs': _safe(f['snr_rs']),
+                    'snr_gap': _safe(f.get('snr_gap')),
+                    'total_cfo': _safe(f['total_cfo']),
+                    'ptm': _safe(f['ptm']),
+                    'pts': _safe(f['pts']),
+                    'rs_corr': _safe(f['rs_corr']),
+                    'sigma2': _safe(f['sigma2']),
+                    'evm_db': _safe(f['evm_db']),
                     'hdr_ok': f['hdr_ok'],
                     'crc_ok': f['crc_ok'],
                 }
