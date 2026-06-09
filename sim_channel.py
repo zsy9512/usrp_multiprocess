@@ -6,12 +6,12 @@ sim_channel.py — 独立仿真信道工具
 读取 sender 输出的 .npy 文件, 施加信道效应后输出供 receiver 消费.
 
 信道模型:
-  y = H * (x * e^(j2πΔf·t) * e^(jφ)) + w
+  y = H * (x * e^(j2piDeltaf·t) * e^(jphi)) + w
 
   其中:
     H       = 多径信道 (可选的 FIR)
-    Δf      = 载波频偏 (Hz)
-    φ       = 初始相位偏移 (rad)
+    Deltaf      = 载波频偏 (Hz)
+    phi       = 初始相位偏移 (rad)
     w       = AWGN (由 SNR 控制)
 
 用法:
@@ -84,7 +84,7 @@ class SimChannel:
 
     @staticmethod
     def _parse_multipath(cfg: str) -> np.ndarray:
-        """解析多径配置字符串 → 信道冲激响应."""
+        """解析多径配置字符串 -> 信道冲激响应."""
         parts = cfg.split(',')
         max_delay = 0
         tap_info = []
@@ -126,7 +126,7 @@ def main():
     args = p.parse_args()
 
     if not os.path.isfile(args.input):
-        print(f"[sim_channel] 错误: 输入文件不存在 → {args.input}")
+        print(f"[sim_channel] 错误: 输入文件不存在 -> {args.input}")
         sys.exit(1)
 
     print(f"[sim_channel] ")
@@ -151,7 +151,7 @@ def main():
 
     # Output as raw binary (interleaved float32 I/Q) for C++ rx
     rx.astype(np.complex64).tofile(args.output)
-    print(f"  输出:     {len(rx)} 复样本 → {args.output}")
+    print(f"  输出:     {len(rx)} 复样本 -> {args.output}")
     print(f"[sim_channel] 完成")
 
 

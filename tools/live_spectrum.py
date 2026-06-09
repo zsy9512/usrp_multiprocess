@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 live_spectrum.py — 实时频谱仪 (共享内存多进程, 零 overflow)
 
-子进程: UHD recv() → shared_memory ring buffer (零拷贝)
-主进程: ring 读 → FFT → 绘图
+子进程: UHD recv() -> shared_memory ring buffer (零拷贝)
+主进程: ring 读 -> FFT -> 绘图
 
 用法:
   python tools/live_spectrum.py --serial 320F33F --freq 915e6 --gain 40

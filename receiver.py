@@ -3,9 +3,9 @@
 receiver.py — BPSK PHY 接收端 (完整三级同步链)
 
 同步方案:
-  ① STF 延迟相关 → 粗包检测 + 粗 CFO (对 CFO 不敏感)
-  ② PSS 互相关 → 精定时 + 峰值质量判据 (peak_to_mean, peak_to_second)
-  ③ RS 线性相位拟合 → 细 CFO + 公共相位 + 信道幅度 + 噪声方差
+  ① STF 延迟相关 -> 粗包检测 + 粗 CFO (对 CFO 不敏感)
+  ② PSS 互相关 -> 精定时 + 峰值质量判据 (peak_to_mean, peak_to_second)
+  ③ RS 线性相位拟合 -> 细 CFO + 公共相位 + 信道幅度 + 噪声方差
 
 帧结构 (符号域):
   STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
@@ -95,8 +95,8 @@ def _stf_delay_correlation(samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]
 def _compute_coarse_cfo(P_peak: complex, L_samples: int, samp_rate: float) -> float:
     """从 STF 延迟相关峰值计算粗 CFO.
 
-    P(d) = Σ r[n]·conj(r[n+L]), 相位 = -2πΔf·L·Ts
-    故: Δf = -angle(P) / (2π·L·Ts)
+    P(d) = Σ r[n]·conj(r[n+L]), 相位 = -2piDeltaf·L·Ts
+    故: Deltaf = -angle(P) / (2pi·L·Ts)
     """
     phase = np.angle(P_peak)
     return -phase / (2 * np.pi * L_samples / samp_rate)
@@ -252,7 +252,7 @@ def _bpsk_demod_hard(symbols: np.ndarray, data_start: int, data_len: int,
                      Ts_sym: float = None) -> np.ndarray:
     """BPSK 硬判决解调 (对齐 loopback_test _bpsk_demod).
 
-    CFO全补偿 + 除以h (含相位校正) → sign(real).
+    CFO全补偿 + 除以h (含相位校正) -> sign(real).
     """
     if Ts_sym is None:
         Ts_sym = TS * SPS
@@ -286,7 +286,7 @@ def _estimate_snr(symbols: np.ndarray, rs_pos: int,
 
 
 def _crc_bits_to_int(crc_bits: np.ndarray) -> int:
-    """16 BPSK hard bits → uint16."""
+    """16 BPSK hard bits -> uint16."""
     val = 0
     for i in range(16):
         val = (val << 1) | int(crc_bits[i])
@@ -320,7 +320,7 @@ RING_CAP = 2_000_000  # 2M 样本共享内存环形缓冲
 
 def _recv_proc(shm_name, serial, freq, gain, rate, subdev, sync_mode, settle_s,
                wr_count, has_data, running, ovf_count):
-    """收样子进程: UHD recv() → shared_memory ring buffer (零拷贝, wr_count 单调递增)."""
+    """收样子进程: UHD recv() -> shared_memory ring buffer (零拷贝, wr_count 单调递增)."""
     import uhd
 
     dev_args = f'serial={serial}' if serial else ''
@@ -474,7 +474,7 @@ class BpskPhyReceiver:
         self.buf_len += space
 
     def _detect_and_demod(self):
-        """检测 → 同步 → 解调 → 消费窗口 (对齐 loopback_test)."""
+        """检测 -> 同步 -> 解调 -> 消费窗口 (对齐 loopback_test)."""
         r = self.buf[:self.buf_len]
 
         while self.running and self.buf_len >= MIN_WIN_SAMPLES:
@@ -526,7 +526,7 @@ class BpskPhyReceiver:
                 fine_cfo, rs_corr = _rs_fine_cfo(symbols, rp, coarse_cfo, self.Ts_sym)
                 if rs_corr < RS_LEN * self.rs_corr_thr:
                     continue
-                if abs(fine_cfo) > 500:               # 细CFO超限 → 拒收
+                if abs(fine_cfo) > 500:               # 细CFO超限 -> 拒收
                     continue
 
                 chan = _rs_channel_estimate(symbols, rp, fine_cfo, coarse_cfo, self.Ts_sym)
@@ -611,7 +611,7 @@ class BpskPhyReceiver:
     def _rx_loop_sim(self, sim_file: str):
         """仿真模式: 从 .npy 文件读取 IQ."""
         if not os.path.isfile(sim_file):
-            print(f"[receiver] 错误: 文件不存在 → {sim_file}")
+            print(f"[receiver] 错误: 文件不存在 -> {sim_file}")
             return
 
         mm = np.load(sim_file, mmap_mode='r')
@@ -635,7 +635,7 @@ class BpskPhyReceiver:
     # ================================================================
 
     def _rx_loop_mp(self, freq, gain, usrp_args, subdev, sync_mode, settle_s):
-        """多进程零拷贝接收: 子进程recv → 共享内存 → 主进程PHY检测."""
+        """多进程零拷贝接收: 子进程recv -> 共享内存 -> 主进程PHY检测."""
         serial = ''
         if 'serial=' in usrp_args:
             serial = usrp_args.split('serial=')[1].split(',')[0]

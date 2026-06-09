@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 channel_measure.py — 全帧已知导频信道精确测量
 
@@ -17,12 +18,12 @@ channel_measure.py — 全帧已知导频信道精确测量
 工作流:
   1. 从 capture 读取 RX IQ + 元数据
   2. 用相同种子重建 TX IQ (每个 frame 完全一致)
-  3. 全帧互相关 → 帧位置 (精确到样本)
-  4. RRC 匹配滤波 → 符号域
-  5. 全帧线性相位拟合 → CFO (496 点, 远优于 RS 的 32 点)
-  6. 全帧 LS 信道估计 → |h|, phase
-  7. Guard 区间噪声测量 → noise_floor (独立于信号的纯底噪)
-  8. 残差噪声 → sigma2 (包含信道估计误差)
+  3. 全帧互相关 -> 帧位置 (精确到样本)
+  4. RRC 匹配滤波 -> 符号域
+  5. 全帧线性相位拟合 -> CFO (496 点, 远优于 RS 的 32 点)
+  6. 全帧 LS 信道估计 -> |h|, phase
+  7. Guard 区间噪声测量 -> noise_floor (独立于信号的纯底噪)
+  8. 残差噪声 -> sigma2 (包含信道估计误差)
   9. 按 gain 分组, 输出精确的 channel_params.json
 
 用法:
@@ -106,7 +107,7 @@ def full_frame_correlate(rx_iq, tx_iq_ref):
 # ═══════════════════════════════════════════════════════════════════════
 
 def full_frame_cfo_estimate(rx_syms, tx_syms_ref, ts_sym=TS_SYM):
-    """全帧线性相位拟合 → 频偏.
+    """全帧线性相位拟合 -> 频偏.
 
     对每个符号计算 phase_diff = angle(rx * conj(tx_ref)),
     unwrap 后在全部 496 符号上做线性回归,
@@ -205,7 +206,7 @@ def full_frame_channel_estimate(rx_syms, tx_syms_ref, cfo_hz, phase_0, ts_sym=TS
 def guard_noise_estimate(rx_syms, guard_start, guard_len=GUARD_SYMBOLS):
     """从 Guard 区间 (零符号) 测量独立噪声方差.
 
-    Guard 符号在 TX 端是纯零 → RX 端收到的就是纯噪声.
+    Guard 符号在 TX 端是纯零 -> RX 端收到的就是纯噪声.
     这是最干净的底噪测量, 不依赖信道估计.
     """
     if guard_start + guard_len > len(rx_syms):
@@ -271,7 +272,7 @@ def measure_channel(iq_path, num_frames=200, seed=42,
         # 重建 TX 波形
         tx_iq_ref, tx_bits_ref, tx_syms_ref = reconstruct_tx_waveform(fid, rng)
 
-        # 全帧互相关 → 帧位置
+        # 全帧互相关 -> 帧位置
         corr, best_pos, best_val = full_frame_correlate(rx_iq, tx_iq_ref)
         if best_val < min_corr_peak:
             continue
@@ -522,7 +523,7 @@ def main():
         s = results['by_gain'][gain_str]
         n = s.get('n_detected', 0)
         nv = s.get('n_cfo_valid', 0)
-        print(f"\n── gain={gain_str} dB ──")
+        print(f"\n-- gain={gain_str} dB --")
         print(f"  检出: {n} 帧  (CFO 有效: {nv})")
         if nv > 0:
             print(f"  CFO:     {s['cfo_hz']['mean']:+.2f} +/- {s['cfo_hz']['std']:.2f} Hz  "
@@ -541,7 +542,7 @@ def main():
     if len(gains_with_cfo) >= 2:
         cfo_means = [s['cfo_hz']['mean'] for s in gains_with_cfo.values()]
         cfo_spread = float(np.std(cfo_means))
-        print(f"\n── 跨 gain CFO 一致性 ──")
+        print(f"\n-- 跨 gain CFO 一致性 --")
         print(f"  CFO mean 散布: {cfo_spread:.2f} Hz  "
               f"{'[OK] 不依赖增益' if cfo_spread < 20 else '[WARN]'}")
         print(f"  -> 仿真可用 CFO: N({np.mean(cfo_means):.1f}, "
@@ -555,7 +556,7 @@ def main():
             'calibration': results['calibration'],
         }
         json.dump(output, f, indent=2, ensure_ascii=False)
-    print(f"\n信道参数 → {args.output}")
+    print(f"\n信道参数 -> {args.output}")
 
 
 if __name__ == '__main__':

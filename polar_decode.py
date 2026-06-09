@@ -37,7 +37,7 @@ def main():
     p.add_argument('--device', default='cpu', help='SGNN 设备 cpu/cuda')
     args = p.parse_args()
 
-    # ── SGNN 初始化 ──
+    # -- SGNN 初始化 --
     model = graph = None
     if args.sgnn:
         import torch

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 sync_sweep.py — 低 SNR 同步链设计 + 诊断工具
 
 目标:
-  用仿真找出当前同步链 (STF→PSS→RS) 在各级 SNR 下的精确失效点,
+  用仿真找出当前同步链 (STF->PSS->RS) 在各级 SNR 下的精确失效点,
   并支持修改帧结构 (STF 重复数 / RS 长度) 来压低工作 SNR。
 
 输入:
@@ -194,7 +195,7 @@ def rs_estimate_custom(syms, rs_pos, rs_ref, coarse_cfo=0.0):
     rs_tone = rs_seg * np.conj(rs_ref)
     rs_corr = float(np.abs(np.sum(rs_tone)))
 
-    # 相位线性回归 → 总 CFO
+    # 相位线性回归 -> 总 CFO
     # 关键: 不 unwrap (真实 CFO < 100 Hz, 32-128 符号内相位积累 < 0.05 rad,
     # 远小于 pi, np.angle 不会发生 2pi 跳变. unwrap 在低 SNR 下反而会放大噪声尖峰)
     rs_phase = np.angle(rs_tone)
@@ -330,7 +331,7 @@ def run_snr_sweep(snr_range, n_frames=200, seed=42,
 
     Args:
         snr_range:  (snr_min, snr_max, snr_step)  dB, 符号域
-        stf_reps:   STF 重复段数 (默认 4 → 64 符号)
+        stf_reps:   STF 重复段数 (默认 4 -> 64 符号)
         rs_len:     RS 长度 (默认 32)
 
     Returns:
@@ -442,7 +443,7 @@ def compare_variants(snr_range=(-5, 20, 2), n_frames=200, cfo_mean=-2.4, cfo_std
 
     all_results = {}
     for v in variants:
-        print(f"\n── {v['label']} ──")
+        print(f"\n-- {v['label']} --")
         t0 = time.time()
         r = run_snr_sweep(snr_range, n_frames=n_frames,
                           stf_reps=v['stf_reps'], rs_len=v['rs_len'],
@@ -473,7 +474,7 @@ def compare_variants(snr_range=(-5, 20, 2), n_frames=200, cfo_mean=-2.4, cfo_std
         }
 
     # 排名
-    print(f"\n── 排名 (90%检出 SNR, 越低越好) ──")
+    print(f"\n-- 排名 (90%检出 SNR, 越低越好) --")
     ranked = sorted([(k, v['snr90'] or 99) for k, v in all_results.items()],
                     key=lambda x: x[1])
     for i, (label, snr90) in enumerate(ranked):
@@ -484,7 +485,7 @@ def compare_variants(snr_range=(-5, 20, 2), n_frames=200, cfo_mean=-2.4, cfo_std
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 重复帧相干叠加模式 (5x same frame → coherent combine)
+# 重复帧相干叠加模式 (5x same frame -> coherent combine)
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
@@ -497,7 +498,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
     """重复帧相干叠加 SNR sweep.
 
     每"组"发送同一帧 n_repeats 次 (间隔 gap_repeat_ms),
-    接收端检测第一帧 → 估计 CFO → 补偿相位 → 5 帧相干叠加 → 同步.
+    接收端检测第一帧 -> 估计 CFO -> 补偿相位 -> 5 帧相干叠加 -> 同步.
 
     帧结构: STF(stf_reps*16) + PSS(64) + RS(rs_len) + Header(32) + Payload(256) + CRC(16) + Guard(32)
 
@@ -531,7 +532,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
         fails = {'STF': 0, 'PSS': 0, 'RS': 0}
 
         for gi in range(n_groups):
-            # ── 生成一帧 + 重复 n_repeats 次 ──
+            # -- 生成一帧 + 重复 n_repeats 次 --
             info_bits = (rng.rand(K_POLAR) < 0.5).astype(np.int64)
             coded = _build_codeword(info_bits)
             frame_syms = build_custom_frame(coded, gi, stf_syms, pss_syms, rs_syms)
@@ -559,7 +560,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
             pad_after = (nf_std * (rng.randn(pad_len) + 1j * rng.randn(pad_len))).astype(np.complex64)
             rx = np.concatenate([pad_before, rx_all, pad_after])
 
-            # ── 检测第一帧位置 + 估计 CFO ──
+            # -- 检测第一帧位置 + 估计 CFO --
             first_frame_start = pad_len  # 第一帧在 rx 中的起始位置 (无组前 gap 时)
             if gi > 0:
                 first_frame_start += gap_group_iq
@@ -593,7 +594,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
                 fails['RS'] += 1
                 continue
 
-            # ── 逐帧独立 PSS 定位 + 相位估计 + 相干叠加 ──
+            # -- 逐帧独立 PSS 定位 + 相位估计 + 相干叠加 --
             ref_phases = []
             all_frame_syms = []
 
@@ -647,7 +648,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
 
             combined_syms = (accum_syms / len(all_frame_syms)).astype(np.complex64)
 
-            # ── 在叠加后的符号上跑同步 ──
+            # -- 在叠加后的符号上跑同步 --
             # PSS (叠加后 SNR 更高, 位置应更精确)
             pk2, ptm2, pts2, pv2 = pss_correlate_custom(combined_syms, pss_syms)
             if ptm2 < pss_ptm or pts2 < pss_pts:
@@ -712,13 +713,13 @@ def run_anyof_repeat_sweep(snr_range, n_groups=50, seed=42,
     """Any-of-N 重复帧 SNR sweep.
 
     每组发送同一帧 n_repeats 次, 接收端独立检测每一帧。
-    只要任意一帧通过 STF+PSS+RS 同步 → 组检出成功。
+    只要任意一帧通过 STF+PSS+RS 同步 -> 组检出成功。
     用 frame_id 去重 (5 帧同一 frame_id, 只计一次)。
 
     优点:
       - 不需要相干叠加, 不需要相位对齐
       - 组检出率 = 1 - (1 - 单帧检出率)^n_repeats
-      - 低 SNR 下极为有效 (5 帧 50% 单帧 → 96.9% 组检出)
+      - 低 SNR 下极为有效 (5 帧 50% 单帧 -> 96.9% 组检出)
     """
     from phy_params import PSS as PSS_REF
 
@@ -843,7 +844,7 @@ def main():
     p.add_argument('--frames', type=int, default=200,
                    help='每 SNR 点仿真帧数 (默认 200)')
     p.add_argument('--stf-reps', type=int, default=4,
-                   help='STF 重复段数 (默认 4 → 64 符号)')
+                   help='STF 重复段数 (默认 4 -> 64 符号)')
     p.add_argument('--rs-len', type=int, default=32,
                    help='RS 长度 (默认 32)')
     p.add_argument('--cfo-mean', type=float, default=-2.4)
@@ -945,7 +946,7 @@ def main():
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"\n结果 → {args.output}")
+        print(f"\n结果 -> {args.output}")
 
 
 if __name__ == '__main__':

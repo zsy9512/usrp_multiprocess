@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 calibrated_simulation.py — Capture-driven calibrated simulation
 
@@ -12,7 +13,7 @@ calibrated_simulation.py — Capture-driven calibrated simulation
   noise ~ CN(0, noise_floor) — 每 gain 档独立实测
 
 两种模式:
-  --mode blind    全盲同步 (STF扫描→PSS→RS→解调), 与硬件公平对比
+  --mode blind    全盲同步 (STF扫描->PSS->RS->解调), 与硬件公平对比
   --mode ideal    已知帧头位置, 只测 BER vs SNR (Stage 6)
 
 用法:
@@ -171,16 +172,16 @@ def simulate_one_frame(info_bits, frame_id, h_mag, cfo_hz, phase_rad,
         dict with sync metrics (same keys as extract_channel_stats detections),
         or None if sync fails.
     """
-    # ── TX: 信息比特 → Polar 编码 → 成帧 → RRC ──
+    # -- TX: 信息比特 -> Polar 编码 -> 成帧 -> RRC --
     coded_bits = _build_codeword(info_bits)
     frame_syms = build_frame(coded_bits, frame_id)
     tx_iq = rrc_filter(frame_syms, RRC, SPS)
 
-    # ── 信道 ──
+    # -- 信道 --
     rx_iq = apply_channel(tx_iq, h_mag, cfo_hz, phase_rad, noise_floor,
                           SAMP_RATE, timing_offset_sym)
 
-    # ── 前后加噪声 padding (模拟帧间隔) ──
+    # -- 前后加噪声 padding (模拟帧间隔) --
     pad_before = 2000  # IQ 样本
     pad_after = 3000
     pad_noise_before = (np.sqrt(noise_floor * SPS / 2)
@@ -191,17 +192,17 @@ def simulate_one_frame(info_bits, frame_id, h_mag, cfo_hz, phase_rad,
                           + 1j * np.random.randn(pad_after))).astype(np.complex64)
     rx_with_pad = np.concatenate([pad_noise_before, rx_iq, pad_noise_after])
 
-    # ── RRC 匹配滤波 ──
+    # -- RRC 匹配滤波 --
     syms = _rrc_match(rx_with_pad)
     if len(syms) < PSS_LEN + RS_LEN:
         return None
 
-    # ── STF 检测 (盲) ──
+    # -- STF 检测 (盲) --
     stf_result = _stf_detect_one(rx_with_pad, stf_threshold, stf_min_energy)
     if stf_result is None:
         return {'detected': False, 'fail_stage': 'STF'}
 
-    # ── PSS ──
+    # -- PSS --
     # 提取帧窗口 (围绕 STF 位置)
     coarse = stf_result['pos']
     margin = 400
@@ -225,7 +226,7 @@ def simulate_one_frame(info_bits, frame_id, h_mag, cfo_hz, phase_rad,
     if rp + RS_LEN + HEADER_LEN + PAYLOAD_LEN + PAYLOAD_CRC_LEN > len(syms_window):
         return {'detected': False, 'fail_stage': 'RS', 'reason': 'frame too long'}
 
-    # ── RS ──
+    # -- RS --
     chan = _rs_estimate(syms_window, rp, stf_result['coarse_cfo'])
     if chan is None:
         return {'detected': False, 'fail_stage': 'RS'}
@@ -237,7 +238,7 @@ def simulate_one_frame(info_bits, frame_id, h_mag, cfo_hz, phase_rad,
     snr_sym = float(10 * np.log10(max(hmag ** 2 / max(noise_floor, 1e-30), 1e-30)))
     snr_rs = float(10 * np.log10(max(hmag ** 2 / max(chan['sigma2'], 1e-30), 1e-30)))
 
-    # ── BPSK 硬解调 ──
+    # -- BPSK 硬解调 --
     hdr_start = rp + RS_LEN
     hdr_bits = _bpsk_demod_hard(syms_window, hdr_start, HEADER_LEN,
                                  chan['h'], chan['total_cfo'])
@@ -259,7 +260,7 @@ def simulate_one_frame(info_bits, frame_id, h_mag, cfo_hz, phase_rad,
         crc_val = _b2i(pay_bits[PAYLOAD_LEN:])
         crc_ok = crc16_check(bits_to_bytes(payload), crc_val)
 
-    # ── LLR + Polar 硬判逆变换 ──
+    # -- LLR + Polar 硬判逆变换 --
     # LLR (对齐 polar_loopback.py _bpsk_demod_llr)
     seg = syms_window[pay_start:pay_start + PAYLOAD_LEN]
     n_arr = np.arange(PAYLOAD_LEN)
@@ -562,7 +563,7 @@ def main():
         hw_stats = hw_data.get('stats', {})
         if hw_stats.get('n_detections', 0) > 0:
             report = compare_with_hardware(s, hw_stats, gain)
-            print(f"\n  ── 硬件 vs 仿真对比 ──")
+            print(f"\n  -- 硬件 vs 仿真对比 --")
             print(f"  检出率: sim={report.get('sim_detection_rate',0)*100:.0f}%  "
                   f"hw={report.get('hw_detection_rate',0)*100:.0f}%")
             if 'cfo_delta_hz' in report:
@@ -584,7 +585,7 @@ def main():
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
-        print(f"\n仿真报告 → {args.output}")
+        print(f"\n仿真报告 -> {args.output}")
 
 
 if __name__ == '__main__':

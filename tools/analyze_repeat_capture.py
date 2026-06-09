@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 analyze_repeat_capture.py — 分析 5x 重复帧 capture (any-of-N 检出 + frame_id 去重)
 
 对应 loopback_capture.py 的 REPEAT=5 发送模式:
   每组 5 帧完全相同 (frame_id 相同), 间隔 3ms, 组间 5ms.
-  接收端对每组 5 帧独立跑 STF→PSS→RS 同步,
-  任意一帧通过 → 组检出成功, 用 frame_id 去重.
+  接收端对每组 5 帧独立跑 STF->PSS->RS 同步,
+  任意一帧通过 -> 组检出成功, 用 frame_id 去重.
 
 用法:
   python tools/analyze_repeat_capture.py capture/low_snr_v2
@@ -39,7 +40,7 @@ from tools.sync_sweep import (make_stf, make_rs,
 
 def detect_one_frame(syms, stf_syms, pss_syms, rs_syms,
                      pss_ptm=2.5, pss_pts=1.0, stf_energy=0.01):
-    """对一段符号序列跑 STF→PSS→RS, 返回 dict 或 None."""
+    """对一段符号序列跑 STF->PSS->RS, 返回 dict 或 None."""
     # STF
     stf_len = len(stf_syms)
     # 不在此做 STF 检测 — 直接从已知 IQ 位置提取符号, 只做 PSS+RS
@@ -207,7 +208,7 @@ def main():
     for pfx in prefixes:
         tag = os.path.basename(pfx)
         gain_str = tag.split('_')[1].replace('gain', '')
-        print(f"\n── {tag} (gain={int(gain_str)} dB) ──")
+        print(f"\n-- {tag} (gain={int(gain_str)} dB) --")
         r = analyze_capture(pfx, num_frames=args.num_frames,
                             pss_ptm=args.pss_ptm, pss_pts=args.pss_pts)
         if 'error' in r:
@@ -236,7 +237,7 @@ def main():
     if args.output:
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
-        print(f"\n报告 → {args.output}")
+        print(f"\n报告 -> {args.output}")
 
 
 if __name__ == '__main__':

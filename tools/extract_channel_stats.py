@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 extract_channel_stats.py — 从 capture 提取信道参数, 直接用于仿真标定
 
@@ -217,19 +218,19 @@ def extract_from_capture(iq_path, stf_threshold=0.4, stf_min_energy=0.01,
     iq = np.load(iq_path)
     n_total = len(iq)
 
-    # ── 底噪 ──
+    # -- 底噪 --
     n_nf = min(n_noise, n_total)
     noise_syms = _rrc_match(iq[:n_nf])
     noise_floor = float(np.var(noise_syms))
 
-    # ── 元数据 ──
+    # -- 元数据 --
     meta = {}
     meta_path = iq_path.replace('_iq.npy', '_meta.json')
     if os.path.isfile(meta_path):
         with open(meta_path) as f:
             meta = json.load(f)
 
-    # ── 全量 STF 扫描 ──
+    # -- 全量 STF 扫描 --
     # 分段处理以避免内存爆炸
     seg_size = 1_000_000
     overlap = FRAME_RRC_SAMPLES + 5000
@@ -247,7 +248,7 @@ def extract_from_capture(iq_path, stf_threshold=0.4, stf_min_energy=0.01,
         if pos >= n_total:
             break
 
-    # ── CFO 过滤: 只保留合理 CFO 的候选 (B210 同板 < 200 Hz) ──
+    # -- CFO 过滤: 只保留合理 CFO 的候选 (B210 同板 < 200 Hz) --
     # 这是关键: 假 STF 峰的 CFO 随机分布在 ±2kHz,
     # 而真帧的 CFO 集中在 0±50Hz
     valid = [i for i, c in enumerate(all_cfos) if abs(c) < 200]
@@ -255,7 +256,7 @@ def extract_from_capture(iq_path, stf_threshold=0.4, stf_min_energy=0.01,
     all_metrics = [all_metrics[i] for i in valid]
     all_cfos = [all_cfos[i] for i in valid]
 
-    # ── 聚类去重 ──
+    # -- 聚类去重 --
     # 在 FRAME_RRC_SAMPLES//2 窗口内只保留最强峰
     if all_peaks:
         arr = list(zip(all_peaks, all_cfos, all_metrics))
@@ -274,7 +275,7 @@ def extract_from_capture(iq_path, stf_threshold=0.4, stf_min_energy=0.01,
     else:
         c_peaks, c_cfos, c_metrics = [], [], []
 
-    # ── 逐候选同步 ──
+    # -- 逐候选同步 --
     detections = []
     for d, coarse_cfo, stf_m in zip(c_peaks, c_cfos, c_metrics):
         # 提取窗口
@@ -420,7 +421,7 @@ def process_captures(prefixes, **kwargs):
         by_gain[gain]['noise_floors'].append(result['noise_floor'])
         by_gain[gain]['prefixes'].append(prefix)
 
-    # ── 每组 gain 的统计 ──
+    # -- 每组 gain 的统计 --
     for gain, data in by_gain.items():
         dets = data['detections']
         n = len(dets)
@@ -476,7 +477,7 @@ def process_captures(prefixes, **kwargs):
             },
         }
 
-    # ── 跨 gain 一致性检查 (验证物理假设) ──
+    # -- 跨 gain 一致性检查 (验证物理假设) --
     gains_with_frames = {g: d for g, d in by_gain.items()
                          if d['stats'].get('n_detections', 0) > 0}
 
@@ -510,7 +511,7 @@ def make_simulation_config(results):
 
     策略:
       - CFO: 从高 SNR capture 拟合 N(mean, std)
-      - 相偏: 均匀 [0, 2π) (物理必然)
+      - 相偏: 均匀 [0, 2pi) (物理必然)
       - 定时偏: 取高 SNR capture 的 std
       - noise_floor: 用目标 gain 档的实测值
       - |h|: 用目标 gain 档的实测均值
@@ -585,7 +586,7 @@ def make_simulation_config(results):
 
 def main():
     p = argparse.ArgumentParser(
-        description='从 capture 提取信道参数 → 仿真标定')
+        description='从 capture 提取信道参数 -> 仿真标定')
     p.add_argument('prefixes', nargs='+',
                    help='capture 前缀 (支持 glob) 或目录')
     p.add_argument('-o', '--output', default='',
@@ -653,7 +654,7 @@ def main():
         data = results['by_gain'][gain_str]
         s = data['stats']
         n = s.get('n_detections', 0)
-        print(f"\n── gain={gain_str} dB ──")
+        print(f"\n-- gain={gain_str} dB --")
         print(f"  底噪: {np.mean(data['noise_floors']):.2e}  "
               f"({10*np.log10(max(np.mean(data['noise_floors']), 1e-30)):.1f} dB)")
         if n == 0:
@@ -673,7 +674,7 @@ def main():
     # 跨 gain 一致性
     cg = results['cross_gain']
     if cg:
-        print(f"\n── 跨 gain 一致性验证 (物理假设) ──")
+        print(f"\n-- 跨 gain 一致性验证 (物理假设) --")
         cfo_ok = cg.get('cfo_consistent', False)
         tim_ok = cg.get('timing_consistent', False)
         print(f"  CFO 一致性:    {'[OK]' if cfo_ok else '[WARN]'}  "
@@ -709,7 +710,7 @@ def main():
 
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
-        print(f"\n标定配置已保存 → {args.output}")
+        print(f"\n标定配置已保存 -> {args.output}")
 
         if 'simulation_calibration' in output and 'error' not in output['simulation_calibration']:
             sc = output['simulation_calibration']

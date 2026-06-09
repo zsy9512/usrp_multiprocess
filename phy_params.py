@@ -15,16 +15,16 @@ SPS = 2                     # 每符号采样数
 ROLLOFF = 0.35              # RRC 滚降系数
 RRC_NUM_SYM = 10            # RRC 滤波器单边符号长度
 
-# STF: 4×16 重复 BPSK → 延迟相关粗捕获 (免疫大频偏)
+# STF: 4×16 重复 BPSK -> 延迟相关粗捕获 (免疫大频偏)
 STF_REP = 16                # 每段长度 (延迟相关间距 L)
 STF_NUM = 4                 # 重复段数
 STF_LEN = STF_REP * STF_NUM # 64 符号
 
-# PSS: Zadoff-Chu → 精定时 + 相关确认
+# PSS: Zadoff-Chu -> 精定时 + 相关确认
 PSS_LEN = 64
 PSS_U = 25
 
-# RS: 已知 BPSK → 细 CFO + 公共相位 + 信道/噪声估计
+# RS: 已知 BPSK -> 细 CFO + 公共相位 + 信道/噪声估计
 RS_LEN = 32
 
 # Header: 预留信息 (后续 MCS/length/ID) + CRC16
@@ -93,7 +93,7 @@ PSS_SEARCH_WIN_SAMPLES = STF_LEN * SPS  # 128
 # 检测推进步长
 ADVANCE_SAMPLES = (PSS_LEN + RS_LEN + HEADER_LEN) * SPS  # ~224
 
-# 帧样本总长 (含 RRC 卷积溢出: mode='full' → len + len(rrc) - 1)
+# 帧样本总长 (含 RRC 卷积溢出: mode='full' -> len + len(rrc) - 1)
 RRC_OUT_EXTRA = RRC_NUM_SYM * SPS  # = 20
 FRAME_RRC_SAMPLES = FRAME_SYMBOLS * SPS + RRC_OUT_EXTRA  # = 1012
 
@@ -196,7 +196,7 @@ def crc16_check(data: np.ndarray, expected_crc: int) -> bool:
 
 
 def bits_to_bytes(bits: np.ndarray) -> np.ndarray:
-    """{0,1} bits → uint8 bytes (MSB first)."""
+    """{0,1} bits -> uint8 bytes (MSB first)."""
     n_bytes = (len(bits) + 7) // 8
     padded = np.zeros(n_bytes * 8, dtype=np.uint8)
     padded[:len(bits)] = bits
@@ -204,7 +204,7 @@ def bits_to_bytes(bits: np.ndarray) -> np.ndarray:
 
 
 def bytes_to_bits(data: np.ndarray, n_bits: int) -> np.ndarray:
-    """uint8 bytes → {0,1} bits (MSB first)."""
+    """uint8 bytes -> {0,1} bits (MSB first)."""
     bits = np.unpackbits(data).astype(np.int64)
     return bits[:n_bits]
 

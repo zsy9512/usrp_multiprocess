@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 batch_capture.py — 批量 SNR sweep 采集 (一键跑完所有增益档位)
 
@@ -25,7 +26,7 @@ batch_capture.py — 批量 SNR sweep 采集 (一键跑完所有增益档位)
 import argparse, json, os, subprocess, sys, time
 from datetime import datetime, timezone
 
-# ── 默认配置 (对齐 polar_loopback.py / loopback_test.py) ──
+# -- 默认配置 (对齐 polar_loopback.py / loopback_test.py) --
 SERIAL       = "320F33F"
 FREQ         = 915e6
 GAIN_TX      = 65
@@ -74,7 +75,7 @@ def main():
     p.add_argument("--skip-analyze", action="store_true", help="跳过离线分析, 只采集")
     args = p.parse_args()
 
-    # ── 输出目录 ──
+    # -- 输出目录 --
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     outdir = args.outdir or f"capture/{today}"
     os.makedirs(outdir, exist_ok=True)
@@ -96,7 +97,7 @@ def main():
             print(f"  [{tag}]  RX gain={gain} dB  (run {run_idx+1}/{args.runs})")
             print(f"{'='*60}")
 
-            # ── 步骤 1: 采集 IQ ──
+            # -- 步骤 1: 采集 IQ --
             cmd = [
                 sys.executable, CAPTURE_SCRIPT,
                 "--serial", args.serial,
@@ -118,16 +119,16 @@ def main():
             # 检查输出文件 (比返回码更可靠)
             iq_path = prefix + "_iq.npy"
             if not args.dry_run and not os.path.isfile(iq_path):
-                print(f"  ❌ 未生成 {iq_path}")
+                print(f"  [FAIL] 未生成 {iq_path}")
                 results.append({"tag": tag, "gain_rx": gain, "run": run_idx,
                                 "capture_ok": False, "error": "no output file"})
                 continue
 
             # 采集成功确认 (文件存在)
             iq_size_mb = os.path.getsize(iq_path) / 1e6 if not args.dry_run else 0
-            print(f"  ✅ {tag}_iq.npy  ({iq_size_mb:.1f} MB)")
+            print(f"  [OK] {tag}_iq.npy  ({iq_size_mb:.1f} MB)")
 
-            # ── 步骤 2: 离线分析 ──
+            # -- 步骤 2: 离线分析 --
             if not args.skip_analyze:
                 stats_json = prefix + "_stats.json"
                 cmd2 = [
@@ -153,9 +154,11 @@ def main():
                         "crc_ok_rate": stats.get("crc_ok_rate"),
                         "hdr_ok_rate": stats.get("hdr_ok_rate"),
                     })
-                    print(f"    检出={stats.get('n_frames','?')}  "
-                          f"SNR={stats.get('snr_prefix_mean','?'):.1f}dB  "
-                          f"CRC={stats.get('crc_ok_rate',0)*100:.0f}%")
+                    nf = stats.get('n_frames', 0)
+                    snr = stats.get('snr_prefix_mean')
+                    crc = stats.get('crc_ok_rate', 0)
+                    snr_str = f'{snr:.1f}' if snr is not None else 'N/A'
+                    print(f"    detected={nf}  SNR={snr_str}dB  CRC={crc*100:.0f}%")
                 else:
                     results.append({"tag": tag, "gain_rx": gain, "run": run_idx,
                                     "capture_ok": True, "analyze_ok": False})
@@ -163,7 +166,7 @@ def main():
                 results.append({"tag": tag, "gain_rx": gain, "run": run_idx,
                                 "capture_ok": True})
 
-    # ── 汇总 ──
+    # -- 汇总 --
     elapsed = time.time() - t_start
     summary = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -183,19 +186,24 @@ def main():
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'='*60}")
-    print(f"完成! 耗时 {elapsed:.0f}s  汇总 → {summary_path}")
+    print(f"完成! 耗时 {elapsed:.0f}s  汇总 -> {summary_path}")
     print(f"{'='*60}")
 
-    # 简洁报表
+    # Summary table
     if results:
-        print(f"\n  {'gain':>5s}  {'run':>3s}  {'帧数':>5s}  {'SNR(dB)':>8s}  {'CRC%':>6s}  {'CFO(Hz)':>10s}")
-        print(f"  {'-'*45}")
+        header = f"  {'gain':>5s}  {'run':>3s}  {'det':>5s}  {'SNR(dB)':>8s}  {'CRC%':>6s}  {'CFO(Hz)':>12s}"
+        print(f"\n{header}")
+        print(f"  {'-'*50}")
         for r in results:
-            nf = r.get("n_frames", "?")
-            snr = f'{r["snr_prefix_mean"]:.1f}' if r.get("snr_prefix_mean") is not None else "?"
-            crc = f'{r.get("crc_ok_rate",0)*100:.0f}' if r.get("crc_ok_rate") is not None else "?"
-            cfo = f'{r.get("cfo_mean",0):+.0f}±{r.get("cfo_std",0):.0f}' if r.get("cfo_mean") is not None else "?"
-            print(f"  {r['gain_rx']:5d}  {r['run']:3d}  {str(nf):>5s}  {snr:>8s}  {crc:>6s}  {cfo:>10s}")
+            nf = r.get("n_frames", 0)
+            snr_val = r.get("snr_prefix_mean")
+            crc_val = r.get("crc_ok_rate")
+            cfo_val = r.get("cfo_mean")
+            nf_str = str(nf) if nf else 'N/A'
+            snr_str = f'{snr_val:.1f}' if snr_val is not None else 'N/A'
+            crc_str = f'{crc_val*100:.0f}' if crc_val is not None else 'N/A'
+            cfo_str = f'{cfo_val:+.0f}' if cfo_val is not None else 'N/A'
+            print(f"  {r['gain_rx']:5d}  {r['run']:3d}  {nf_str:>5s}  {snr_str:>8s}  {crc_str:>6s}  {cfo_str:>12s}")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """polar_loopback.py — 极化码 USRP 环回 (收敛版 v2)
 
-  信息比特(128) → Polar编码 → BPSK → 同步 → LLR软解调 → Hard Inverse → BER
+  信息比特(128) -> Polar编码 -> BPSK -> 同步 -> LLR软解调 -> Hard Inverse -> BER
   SGNN 评估通过 --dump-llr 离线完成。
 
   同步链 (三级, 参考 receiver.py):
-    ① STF 延迟相关 → 粗包检测 + 粗 CFO (峰值聚类去重)
-    ② PSS 互相关   → 精定时 + 峰值质量 (peak_to_mean, peak_to_second)
-    ③ RS 线性相位拟合 → 细 CFO + 公共相位 + 信道幅度 + 噪声方差
+    ① STF 延迟相关 -> 粗包检测 + 粗 CFO (峰值聚类去重)
+    ② PSS 互相关   -> 精定时 + 峰值质量 (peak_to_mean, peak_to_second)
+    ③ RS 线性相位拟合 -> 细 CFO + 公共相位 + 信道幅度 + 噪声方差
 
   帧结构 (符号域):
     STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
@@ -43,7 +43,7 @@ LLR_CLIP = 20.0  # LLR 裁剪范围 [-20, 20]
 
 
 def _polar_encode(u):
-    """Arikan polar transform (自逆). u: (N,) {0,1} → cw: (N,) {0,1}."""
+    """Arikan polar transform (自逆). u: (N,) {0,1} -> cw: (N,) {0,1}."""
     cw = u.copy().ravel()
     for stage in range(1, int(math.log2(N)) + 1):
         sep = N // (1 << stage)
@@ -54,7 +54,7 @@ def _polar_encode(u):
 
 
 def _build_codeword(info_bits):
-    """K=128 信息比特 → 放置到非冻结位 → Polar 编码 → N=256 码字."""
+    """K=128 信息比特 -> 放置到非冻结位 -> Polar 编码 -> N=256 码字."""
     u = np.zeros(N, dtype=np.int64)
     u[FROZEN_MASK.astype(bool)] = info_bits.ravel()
     return _polar_encode(u)
@@ -63,7 +63,7 @@ def _build_codeword(info_bits):
 def _polar_hard_inverse(llr):
     """硬判逆 Polar 变换 (baseline, 非纠错译码).
 
-    sign(LLR) → polar_transform → 提取信息位.
+    sign(LLR) -> polar_transform -> 提取信息位.
     这不会利用冻结位约束做 SC/SCL 纠错。
     Polar 纠错能力主要由 SGNN 路径体现。
     """
@@ -89,7 +89,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     tx_info = np.ndarray((num_frames, K), dtype=np.int8, buffer=tx_info_shm.buf) if tx_info_shm else None
     ts_sym = SPS / samp_rate
 
-    # ── 阈值提取 ──
+    # -- 阈值提取 --
     if thresholds is None:
         thresholds = {}
     stf_thr    = thresholds.get('stf_threshold', STF_THRESHOLD)
@@ -99,7 +99,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     rs_corr_th = thresholds.get('rs_corr_thr', 0.3)
     fine_cfo_max = thresholds.get('fine_cfo_max', 500)
 
-    # ── LLR dump 共享内存 ──
+    # -- LLR dump 共享内存 --
     dump_shm = None
     dump_data = None
     dump_count = 0
@@ -110,7 +110,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         dump_data = np.ndarray((num_frames, dump_row_bytes), dtype=np.uint8,
                                buffer=dump_shm.buf)
 
-    # ── 逐帧统计 dump 共享内存 ──
+    # -- 逐帧统计 dump 共享内存 --
     stats_shm = None
     stats_data = None
     stats_count = 0
@@ -194,12 +194,12 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         rs_seg = symbols[rs_pos:rs_pos + RS_LEN].copy()
         n_rs = np.arange(RS_LEN)
 
-        # 粗 CFO 预补偿 → 残余小频偏上用线性拟合
+        # 粗 CFO 预补偿 -> 残余小频偏上用线性拟合
         if abs(coarse_cfo) > 0.0:
             pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * ts_sym)
             rs_seg = rs_seg * pre_comp
 
-        # 细 CFO: unwrap 相位 → 线性回归斜率
+        # 细 CFO: unwrap 相位 -> 线性回归斜率
         rs_tone = rs_seg * np.conj(RS)
         rs_corr = float(np.abs(np.sum(rs_tone)))
         rs_phase = np.unwrap(np.angle(rs_tone))
@@ -210,7 +210,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         slope = num / (den + 1e-30)
         fine_cfo = slope / (2 * np.pi * ts_sym)
 
-        # 细 CFO 超限 → PSS 定时错误, 拒收
+        # 细 CFO 超限 -> PSS 定时错误, 拒收
         if abs(fine_cfo) > fine_cfo_max: return None
 
         # 总 CFO 补偿 + 信道估计
@@ -236,11 +236,11 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
     # BPSK 软解调 (LLR) + 硬判决
     # ------------------------------------------------------------------
     def _bpsk_demod_llr(symbols, data_start, data_len, chan):
-        """BPSK 软解调 → LLR.
+        """BPSK 软解调 -> LLR.
 
-        LLR = 4 * Re(y_eq) / sigma2,  y_eq = symbols * exp(-j·2π·Δf·t) / h
+        LLR = 4 * Re(y_eq) / sigma2,  y_eq = symbols * exp(-j·2pi·Deltaf·t) / h
 
-        RS 估计的 sigma2 是复残差方差 → 实部方差 = sigma2/2.
+        RS 估计的 sigma2 是复残差方差 -> 实部方差 = sigma2/2.
         LLR = 2*y/(sigma2/2) = 4*y/sigma2.
 
         sigma2 用 max(sigma2, 1e-6) 做下限保护 (不用 sigma2_clip).
@@ -271,7 +271,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         return v
 
     # ------------------------------------------------------------------
-    # 主循环: 缓冲 → 检测 → 同步 → 解调 → 消费
+    # 主循环: 缓冲 -> 检测 -> 同步 -> 解调 -> 消费
     # ------------------------------------------------------------------
     buf = np.zeros(1_000_000, dtype=np.complex64); buf_len = 0
     rd = 0; total = 0; hdr_ok_cnt = 0
@@ -374,7 +374,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
                     pay_hard = _bpsk_demod_hard(syms, pay_start, PAYLOAD_LEN, chan)
                     pay_llr = _bpsk_demod_llr(syms, pay_start, PAYLOAD_LEN, chan)
 
-                    # ⑥ 极化逆变换 → 信息比特估计
+                    # ⑥ 极化逆变换 -> 信息比特估计
                     info_hat = _polar_hard_inverse(pay_llr)
 
                     # ⑦ 统计 (CRC 不参与成败判据)
@@ -498,7 +498,7 @@ def main():
     p.add_argument('--frame-gap-ms', type=float, default=5.0)
     p.add_argument('--dump-llr', default='', help='保存 LLR 到 .npy (离线 SGNN 评估)')
 
-    # ── 同步阈值 (可配置, 默认对齐 loopback_test.py / phy_params.py) ──
+    # -- 同步阈值 (可配置, 默认对齐 loopback_test.py / phy_params.py) --
     p.add_argument('--stf-threshold', type=float, default=STF_THRESHOLD,
                    help=f'STF 归一化相关门限 (默认 {STF_THRESHOLD})')
     p.add_argument('--stf-min-energy', type=float, default=STF_MIN_ENERGY,
@@ -514,7 +514,7 @@ def main():
     p.add_argument('--noise-window', type=int, default=50000,
                    help='底噪测量 IQ 样本数 (默认 50000)')
 
-    # ── 元数据 / 统计导出 ──
+    # -- 元数据 / 统计导出 --
     p.add_argument('--save-meta', default='',
                    help='保存阈值+配置元数据到 JSON')
     p.add_argument('--dump-stats', default='',
@@ -544,7 +544,7 @@ def main():
     rx = usrp.get_rx_stream(rx_s)
     rx.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.start_cont))
 
-    # ── 创建共享内存 + 子进程 ──
+    # -- 创建共享内存 + 子进程 --
     ctx = mp.get_context('spawn')
     shm = shared_memory.SharedMemory(create=True, size=RING_CAP * 8)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf); ring[:] = 0j
@@ -559,7 +559,7 @@ def main():
     tx_info_arr = np.ndarray((args.num_frames, K), dtype=np.int8, buffer=tx_info_shm.buf)
     tx_info_arr[:] = 0
 
-    # ── LLR dump 共享内存 ──
+    # -- LLR dump 共享内存 --
     dump_shm = None
     dump_shm_name = None
     if args.dump_llr:
@@ -568,7 +568,7 @@ def main():
             size=args.num_frames * dump_row_bytes)
         dump_shm_name = dump_shm.name
 
-    # ── 逐帧统计 dump 共享内存 ──
+    # -- 逐帧统计 dump 共享内存 --
     stats_shm = None
     stats_shm_name = None
     if args.dump_stats:
@@ -578,7 +578,7 @@ def main():
             size=args.num_frames * stats_row_bytes)
         stats_shm_name = stats_shm.name
 
-    # ── 阈值打包 ──
+    # -- 阈值打包 --
     thresholds_dict = {
         'stf_threshold': args.stf_threshold,
         'stf_min_energy': args.stf_min_energy,
@@ -598,7 +598,7 @@ def main():
     proc.start()
     print(f"[polar_loopback] 处理子进程 PID={proc.pid}")
 
-    # ── RX 收样线程 ──
+    # -- RX 收样线程 --
     def rx_thread():
         md = uhd.types.RXMetadata()
         b = np.zeros((1, 4096), dtype=np.complex64); w = 0
@@ -615,7 +615,7 @@ def main():
     threading.Thread(target=rx_thread, daemon=True).start()
     time.sleep(1)
 
-    # ── TX 线程 ──
+    # -- TX 线程 --
     gap = max(16, int(args.frame_gap_ms * args.rate / 1000))
     tx_done = threading.Event()
 
@@ -631,7 +631,7 @@ def main():
 
         for f in range(args.num_frames):
             tx_ts[f] = time.time_ns()
-            # K=128 信息比特 → 极化编码 → N=256 码字
+            # K=128 信息比特 -> 极化编码 -> N=256 码字
             info_bits = np.fromiter((next_bit() for _ in range(K)),
                                     dtype=np.int64, count=K)
             tx_info_arr[f] = info_bits.astype(np.int8)
@@ -654,7 +654,7 @@ def main():
           f"STF_thr={args.stf_threshold}  STF_energy={args.stf_min_energy}  "
           f"dump_llr={'on' if args.dump_llr else 'off'}", flush=True)
 
-    # ── 保存元数据 JSON ──
+    # -- 保存元数据 JSON --
     if args.save_meta:
         meta = {
             'timestamp_utc': datetime.now(timezone.utc).isoformat(),
@@ -685,7 +685,7 @@ def main():
     running.value = 0; proc.join(timeout=5)
     if proc.is_alive(): proc.terminate()
 
-    # ── 保存 LLR dump ──
+    # -- 保存 LLR dump --
     if args.dump_llr and dump_shm is not None:
         dump_row_bytes = 4 + N * 4 + K
         dump_arr = np.ndarray((args.num_frames, dump_row_bytes), dtype=np.uint8,
@@ -695,7 +695,7 @@ def main():
         print(f"[polar_loopback] LLR dump saved: {save_path}  "
               f"({args.num_frames} rows, each {dump_row_bytes}B)", flush=True)
 
-    # ── 保存 per-frame stats ──
+    # -- 保存 per-frame stats --
     if args.dump_stats and stats_shm is not None:
         stats_row_bytes = 32 * 8
         stats_arr = np.ndarray((args.num_frames, stats_row_bytes), dtype=np.uint8,

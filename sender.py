@@ -5,16 +5,16 @@ sender.py — BPSK PHY 发送端 (完整帧结构)
 帧结构 (符号域):
   STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
 
-  STF   = 4×16 重复 BPSK  → 粗检测 + 粗 CFO
-  PSS   = Zadoff-Chu u=25 → 精定时
-  RS    = 已知 BPSK 导频  → 细 CFO + 相位 + 信道估计
-  Header= 预留 + CRC16    → 帧控制
+  STF   = 4×16 重复 BPSK  -> 粗检测 + 粗 CFO
+  PSS   = Zadoff-Chu u=25 -> 精定时
+  RS    = 已知 BPSK 导频  -> 细 CFO + 相位 + 信道估计
+  Header= 预留 + CRC16    -> 帧控制
   Payload = 数据比特
-  CRC   = Payload CRC16   → 帧正确性
-  Guard = 零符号          → 滤波尾巴
+  CRC   = Payload CRC16   -> 帧正确性
+  Guard = 零符号          -> 滤波尾巴
 
 流水线:
-  Info bits → Polar编码 → BPSK → 成帧 → RRC → 发送/保存
+  Info bits -> Polar编码 -> BPSK -> 成帧 -> RRC -> 发送/保存
 
 用法:
   仿真: python sender.py --mode sim --num-frames 200 --sim-file tx_iq.npy
@@ -38,7 +38,7 @@ from phy_params import (
 # ======================================================================
 
 def _bpsk(bits: np.ndarray) -> np.ndarray:
-    """{0,1} → {+1,-1} BPSK."""
+    """{0,1} -> {+1,-1} BPSK."""
     return (1.0 - 2.0 * bits).astype(np.float32)
 
 
@@ -82,7 +82,7 @@ def build_frame(data_bits: np.ndarray, frame_id: int = 0) -> np.ndarray:
 
 
 def rrc_filter(symbols: np.ndarray, rrc: np.ndarray, sps: int) -> np.ndarray:
-    """RRC 脉冲成形: 上采样 → 滤波."""
+    """RRC 脉冲成形: 上采样 -> 滤波."""
     up = np.zeros(len(symbols) * sps, dtype=np.complex64)
     up[::sps] = symbols
     return np.convolve(up, rrc, mode='full').astype(np.complex64)
@@ -157,7 +157,7 @@ class BpskPhySender:
 
         print(f"[sender] mode={mode}  rate={self.samp_rate/1e6:.1f}Msps  "
               f"sps={self.sps}  interval={frame_interval*1000:.2f}ms")
-        print(f"[sender] frame={FRAME_SYMBOLS}sym → {frame_samples}samples  "
+        print(f"[sender] frame={FRAME_SYMBOLS}sym -> {frame_samples}samples  "
               f"air_time={air_time_ms:.3f}ms")
 
         # --- 硬件初始化 ---
@@ -228,11 +228,11 @@ class BpskPhySender:
             else:
                 tx_iq = np.concatenate(iq_list) if iq_list else np.array([], dtype=np.complex64)
                 np.save(sim_file, tx_iq)
-                print(f"[sender] 已保存 {len(tx_iq)} 样本 → {sim_file}")
+                print(f"[sender] 已保存 {len(tx_iq)} 样本 -> {sim_file}")
                 if save_bits and bits_list:
                     bits_file = sim_file.replace('.npy', '_bits.npy')
                     np.save(bits_file, np.concatenate(bits_list))
-                    print(f"[sender] 已保存发送比特 → {bits_file}")
+                    print(f"[sender] 已保存发送比特 -> {bits_file}")
 
     def stop(self):
         self.running = False

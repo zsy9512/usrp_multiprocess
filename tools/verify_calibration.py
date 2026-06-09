@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 verify_calibration.py — Stage 0验收: 确认 SNR/CFO/EVM 口径统一
 
@@ -36,7 +37,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
     print(f"Stage 0 校准验证: {prefix}")
     print(f"{'='*70}")
 
-    # ── 加载数据 ──
+    # -- 加载数据 --
     if not os.path.isfile(iq_path):
         print(f"错误: 找不到 {iq_path}")
         return False
@@ -55,13 +56,13 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
         meta = None
         print("(无 _meta.json, 旧格式 capture)")
 
-    # ── 底噪测量 ──
+    # -- 底噪测量 --
     noise_floor = noise_floor_from_iq(iq, RRC, SPS, RRC_DELAY_SAMPLES, n_noise=50000)
     print(f"\n【底噪】")
     print(f"  noise_floor (symbol var): {noise_floor:.6f}  "
           f"({10*np.log10(max(noise_floor,1e-30)):.1f} dB)")
 
-    # ── 导入 analyzer 做帧检测 ──
+    # -- 导入 analyzer 做帧检测 --
     from tools.loopback_analyze import analyze_frames_sequential
 
     tx_bits = np.load(bits_path) if os.path.isfile(bits_path) else None
@@ -76,7 +77,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
     n = len(frames)
     print(f"\n【检出】 {n} 帧")
 
-    # ── 验证 1: sigma2 计算一致性 ──
+    # -- 验证 1: sigma2 计算一致性 --
     print(f"\n【验证 1: sigma2 (Welch)】")
     # 手动重新计算几个帧的 sigma2, 确认与 analyzer 一致
     from tools.loopback_analyze import rs_estimate as ana_rs_est
@@ -99,7 +100,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
     else:
         print(f"  [FAIL] sigma2 异常")
 
-    # ── 验证 2: 三种 SNR 的单调性 ──
+    # -- 验证 2: 三种 SNR 的单调性 --
     print(f"\n【验证 2: SNR 多口径比较】")
     snr_prefix = [f['snr_prefix'] for f in frames]
     snr_rs = [f['snr_rs'] for f in frames]
@@ -123,7 +124,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
 
     print(f"  [OK] 三种 SNR 口径可用")
 
-    # ── 验证 3: PSS 质量分布 ──
+    # -- 验证 3: PSS 质量分布 --
     print(f"\n【验证 3: PSS 质量分布】")
     ptms = [f['ptm'] for f in frames]
     ptss = [f['pts'] for f in frames]
@@ -143,19 +144,19 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
     else:
         print(f"  [FAIL] 部分帧不满足阈值 — 检查同步链")
 
-    # ── 验证 4: CFO 分布 ──
+    # -- 验证 4: CFO 分布 --
     print(f"\n【验证 4: CFO 分布】")
     cfos = [f['total_cfo'] for f in frames]
     print(f"  total CFO:  mean={np.mean(cfos):+.1f}  std={np.std(cfos):.1f}  "
           f"min={np.min(cfos):+.1f}  max={np.max(cfos):+.1f} Hz")
     if np.std(cfos) < 50:
-        print(f"  [OK] CFO 稳定 (σ={np.std(cfos):.1f} Hz)")
+        print(f"  [OK] CFO 稳定 (sigma={np.std(cfos):.1f} Hz)")
     elif np.std(cfos) < 200:
-        print(f"  [WARN] CFO 有一定波动 (σ={np.std(cfos):.1f} Hz)")
+        print(f"  [WARN] CFO 有一定波动 (sigma={np.std(cfos):.1f} Hz)")
     else:
-        print(f"  [FAIL] CFO 波动过大 (σ={np.std(cfos):.1f} Hz) — 可能有定时跳变")
+        print(f"  [FAIL] CFO 波动过大 (sigma={np.std(cfos):.1f} Hz) — 可能有定时跳变")
 
-    # ── 验证 5: 帧间距 ──
+    # -- 验证 5: 帧间距 --
     print(f"\n【验证 5: 帧间距】")
     if len(frames) >= 2:
         gaps = np.diff([f['global_pos'] for f in frames])
@@ -168,7 +169,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
         else:
             print(f"  [WARN] 帧间距偏差 {gap_error*100:.1f}% — 可能有漏帧或误检")
 
-    # ── 验证 6: CRC 率 ──
+    # -- 验证 6: CRC 率 --
     print(f"\n【验证 6: CRC 率】")
     hdr_ok = sum(1 for f in frames if f['hdr_ok'])
     crc_ok = sum(1 for f in frames if f['crc_ok'])
@@ -179,7 +180,7 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
     elif crc_ok / max(n, 1) >= 0.8:
         print(f"  [WARN] CRC 率可接受 (≥80%)")
 
-    # ── Export ──
+    # -- Export --
     if output:
         export = {
             'prefix': prefix,
@@ -218,9 +219,9 @@ def verify_calibration(prefix, pss_ptm=3.5, pss_pts=1.5, output=''):
         }
         with open(output, 'w', encoding='utf-8') as fh:
             json.dump(export, fh, indent=2, ensure_ascii=False)
-        print(f"\n逐帧数据已导出 → {output}")
+        print(f"\n逐帧数据已导出 -> {output}")
 
-    # ── 总结 ──
+    # -- 总结 --
     print(f"\n{'='*70}")
     all_ok = sigma2_ok and n > 0
     print(f"Stage 0 校准验证: {'[OK] PASS' if all_ok else '[FAIL] FAIL'}")

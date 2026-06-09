@@ -2,9 +2,9 @@
 """loopback_test.py — 单 B210 环回 (USRP线程+处理后子进程, 零overflow)
 
 同步链 (三级, 参考 receiver.py):
-  ① STF 延迟相关 → 粗包检测 + 粗 CFO (峰值聚类去重)
-  ② PSS 互相关   → 精定时 + 峰值质量 (peak_to_mean, peak_to_second)
-  ③ RS 线性相位拟合 → 细 CFO + 公共相位 + 信道幅度 + 噪声方差
+  ① STF 延迟相关 -> 粗包检测 + 粗 CFO (峰值聚类去重)
+  ② PSS 互相关   -> 精定时 + 峰值质量 (peak_to_mean, peak_to_second)
+  ③ RS 线性相位拟合 -> 细 CFO + 公共相位 + 信道幅度 + 噪声方差
 
 帧结构 (符号域):
   STF(64) + PSS(64) + RS(32) + Header(32) + Payload(256) + CRC(16) + Guard(32)
@@ -115,12 +115,12 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         rs_seg = symbols[rs_pos:rs_pos + RS_LEN].copy()
         n_rs = np.arange(RS_LEN)
 
-        # 粗 CFO 预补偿 → 残余小频偏上用线性拟合
+        # 粗 CFO 预补偿 -> 残余小频偏上用线性拟合
         if abs(coarse_cfo) > 0.0:
             pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * ts_sym)
             rs_seg = rs_seg * pre_comp
 
-        # 细 CFO: unwrap 相位 → 线性回归斜率
+        # 细 CFO: unwrap 相位 -> 线性回归斜率
         rs_tone = rs_seg * np.conj(RS)
         rs_corr = float(np.abs(np.sum(rs_tone)))
         rs_phase = np.unwrap(np.angle(rs_tone))
@@ -131,7 +131,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         slope = num / (den + 1e-30)
         fine_cfo = slope / (2 * np.pi * ts_sym)
 
-        # 细 CFO 超限 → PSS 定时错误, 拒收
+        # 细 CFO 超限 -> PSS 定时错误, 拒收
         if abs(fine_cfo) > 500: return None
 
         # 总 CFO 补偿 + 信道估计
@@ -174,7 +174,7 @@ def _proc_worker(shm_name, wr_count, has_data, running, num_frames,
         return v
 
     # ------------------------------------------------------------------
-    # 主循环: 缓冲 → 检测 → 同步 → 解调 → 消费
+    # 主循环: 缓冲 -> 检测 -> 同步 -> 解调 -> 消费
     # ------------------------------------------------------------------
     buf = np.zeros(1_000_000, dtype=np.complex64); buf_len = 0
     rd = 0; total = 0; hdr_ok_cnt = 0; crc_ok_cnt = 0
@@ -384,7 +384,7 @@ def main():
     rx = usrp.get_rx_stream(rx_s)
     rx.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.start_cont))
 
-    # ── 创建共享内存 + 子进程 ──
+    # -- 创建共享内存 + 子进程 --
     ctx = mp.get_context('spawn')
     shm = shared_memory.SharedMemory(create=True, size=RING_CAP * 8)
     ring = np.ndarray(RING_CAP, dtype=np.complex64, buffer=shm.buf); ring[:] = 0j
@@ -406,7 +406,7 @@ def main():
     proc.start()
     print(f"[loopback] 处理子进程 PID={proc.pid}")
 
-    # ── RX 收样线程 ──
+    # -- RX 收样线程 --
     def rx_thread():
         md = uhd.types.RXMetadata()
         b = np.zeros((1, 4096), dtype=np.complex64); w = 0
@@ -423,7 +423,7 @@ def main():
     threading.Thread(target=rx_thread, daemon=True).start()
     time.sleep(1)
 
-    # ── TX 线程 ──
+    # -- TX 线程 --
     gap = max(16, int(args.frame_gap_ms * args.rate / 1000))
     tx_done = threading.Event()
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 iq_analyzer.py — 离线 IQ 分析 + 可视化 + 增益推荐
 
@@ -53,24 +54,24 @@ def analyze(filepath, samp_rate=1e6, do_plot=False, save_prefix=''):
     # 增益推荐
     print(f"\n【增益诊断】")
     if peak < 0.01:
-        print(f"  ❌ 无信号 (max={peak:.4f}) — 检查 TX 是否发射、SMA 是否连接")
+        print(f"  [FAIL] 无信号 (max={peak:.4f}) — 检查 TX 是否发射、SMA 是否连接")
     elif clipped_pct > 5:
-        print(f"  ⚠ 严重削峰 ({clipped_pct:.1f}% 样本饱和) — 降低 RX gain 或加衰减器")
-        print(f"  → 建议 RX gain 降低 {int(clipped_pct)} dB")
+        print(f"  [WARN] 严重削峰 ({clipped_pct:.1f}% 样本饱和) — 降低 RX gain 或加衰减器")
+        print(f"  -> 建议 RX gain 降低 {int(clipped_pct)} dB")
     elif clipped_pct > 1:
-        print(f"  ⚠ 轻微削峰 ({clipped_pct:.1f}%) — 可适当降低 RX gain")
+        print(f"  [WARN] 轻微削峰 ({clipped_pct:.1f}%) — 可适当降低 RX gain")
     elif peak < 0.15:
-        print(f"  ⚠ 信号偏弱 (max={peak:.3f}) — 提高 TX gain 或 RX gain")
+        print(f"  [WARN] 信号偏弱 (max={peak:.3f}) — 提高 TX gain 或 RX gain")
         boost = int(-20 * np.log10(peak / 0.5))
-        print(f"  → 建议增益提高 ~{boost} dB (目标 max≈0.5)")
+        print(f"  -> 建议增益提高 ~{boost} dB (目标 max≈0.5)")
     elif peak < 0.3:
-        print(f"  ✅ 可用但偏弱 (max={peak:.3f})")
+        print(f"  [OK] 可用但偏弱 (max={peak:.3f})")
         boost = int(-20 * np.log10(peak / 0.5))
-        print(f"  → 可选增益 +{boost} dB")
+        print(f"  -> 可选增益 +{boost} dB")
     elif peak <= 0.85:
-        print(f"  ✅ 增益合适 (max={peak:.3f})")
+        print(f"  [OK] 增益合适 (max={peak:.3f})")
     else:
-        print(f"  ⚠ 接近削峰 (max={peak:.3f})")
+        print(f"  [WARN] 接近削峰 (max={peak:.3f})")
 
     # ============================================================
     # 2. 功率谱
@@ -90,9 +91,9 @@ def analyze(filepath, samp_rate=1e6, do_plot=False, save_prefix=''):
         print(f"\n【功率谱】")
         print(f"  峰值频偏: {cfo_khz:+.1f} kHz (两台B210时钟差)")
         if abs(cfo_khz) > 3:
-            print(f"  ⚠ 频偏过大 ({cfo_khz:+.1f}kHz) — 超出BPSK容忍, 考虑external_ref")
+            print(f"  [WARN] 频偏过大 ({cfo_khz:+.1f}kHz) — 超出BPSK容忍, 考虑external_ref")
         elif abs(cfo_khz) > 0.5:
-            print(f"  ⚠ 频偏 {cfo_khz:+.1f}kHz — 同步链可纠正")
+            print(f"  [WARN] 频偏 {cfo_khz:+.1f}kHz — 同步链可纠正")
 
     # ============================================================
     # 3. STF 延迟相关
@@ -133,7 +134,7 @@ def analyze(filepath, samp_rate=1e6, do_plot=False, save_prefix=''):
         gap_between = gap_mean - frame_len
         print(f"  帧间距: {gap_mean:.0f} 样本 (帧 {frame_len} + 间隔 ~{gap_between:.0f})")
         if gap_between < 0:
-            print(f"  ⚠ 间距异常 — 帧可能有重叠或 gap 太小")
+            print(f"  [WARN] 间距异常 — 帧可能有重叠或 gap 太小")
 
     # ============================================================
     # 4. 帧能量分布
@@ -147,9 +148,9 @@ def analyze(filepath, samp_rate=1e6, do_plot=False, save_prefix=''):
     if frame_energies:
         e_mean, e_std = np.mean(frame_energies), np.std(frame_energies)
         print(f"\n【帧能量】")
-        print(f"  均值={e_mean:.4f}  σ={e_std:.4f}")
+        print(f"  均值={e_mean:.4f}  sigma={e_std:.4f}")
         if e_std / (e_mean + 1e-30) > 0.3:
-            print(f"  ⚠ 帧能量波动大 — 可能有 overflow 导致帧不完整")
+            print(f"  [WARN] 帧能量波动大 — 可能有 overflow 导致帧不完整")
 
     print(f"\n{'='*60}")
     print(f"总结: {n_frames} 候选帧, 频偏 {cfo_khz:+.1f}kHz, 峰值 {peak:.3f}")
@@ -214,7 +215,7 @@ def analyze(filepath, samp_rate=1e6, do_plot=False, save_prefix=''):
         if save_prefix:
             out = f'{save_prefix}_{os.path.basename(filepath).replace(".npy","")}.png'
             fig.savefig(out, dpi=150)
-            print(f"图已保存 → {out}")
+            print(f"图已保存 -> {out}")
         if do_plot:
             plt.show()
         else:

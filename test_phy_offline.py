@@ -150,7 +150,7 @@ def run_test_single(name: str, tx_iq: np.ndarray, ref_bits: np.ndarray,
         f"  [{status}] {name:20s}  "
         f"SNR={snr_db:5.1f}dB  "
         f"CFO={freq_offset:+7.0f}Hz  "
-        f"θ={phase_offset:+.2f}rad  "
+        f"theta={phase_offset:+.2f}rad  "
         f"多径={multipath or '无':15s}  "
         f"检帧={stats['total_frames']:4d}  "
         f"CRC={stats['crc_pass']:4d}/{stats['total_frames']:d}  "
@@ -273,11 +273,11 @@ def test_matrix_C(logger: TestLogger, num_frames: int = 200,
     phase_list = [0, np.pi/8, np.pi/4, np.pi/2, 3*np.pi/4, np.pi, -np.pi/2]
     results = []
     for theta in phase_list:
-        r = run_test_single(f"C_θ{theta:.3f}", tx_iq, None,
+        r = run_test_single(f"C_theta{theta:.3f}", tx_iq, None,
                             20, 0, theta, "", samp_rate, logger)
         results.append(r)
 
-    logger.log(f"\n  {'θ(rad)':>10s}  {'检帧':>6s}  {'CRC':>6s}  {'CRC率':>8s}  {'状态':>6s}")
+    logger.log(f"\n  {'theta(rad)':>10s}  {'检帧':>6s}  {'CRC':>6s}  {'CRC率':>8s}  {'状态':>6s}")
     logger.log(f"  {'-'*45}")
     for r in results:
         logger.log(f"  {r['phase_offset_rad']:10.4f}  {r['detected']:6d}  "

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 loopback_capture.py — B210 自发自收 IQ 采集 (用于离线调试同步链)
 
@@ -75,7 +76,7 @@ def main():
     overflow_count = [0]
     tx_bits_list = []   # 保存每帧的随机比特
 
-    # ── RX 收样线程 ──
+    # -- RX 收样线程 --
     def rx_thread():
         md = uhd.types.RXMetadata()
         buf = np.zeros((1, 8192), dtype=np.complex64)
@@ -91,12 +92,12 @@ def main():
     th.Thread(target=rx_thread, daemon=True).start()
     time.sleep(1)
 
-    # ── TX 线程 ──
+    # -- TX 线程 --
     from sender import build_frame, rrc_filter
 
     gap = max(16, int(args.frame_gap_ms * SAMP_RATE / 1000))
     REPEAT = 5                     # 每帧重复次数
-    GAP_REPEAT = int(0.003 * SAMP_RATE)  # 重复间隔 3ms → 3000 IQ 样本
+    GAP_REPEAT = int(0.003 * SAMP_RATE)  # 重复间隔 3ms -> 3000 IQ 样本
     tx_done = threading.Event()
 
     def tx_thread():
@@ -121,7 +122,7 @@ def main():
 
     th.Thread(target=tx_thread, daemon=True).start()
 
-    # ── 等待 TX 完成 + 额外 2s 收尾 ──
+    # -- 等待 TX 完成 + 额外 2s 收尾 --
     print(f"[capture] TX {args.num_frames} frames ×{REPEAT} repeats @ {args.freq/1e6:.1f}MHz  "
           f"TXgain={args.gain_tx}  RXgain={args.gain_rx}  gap={args.frame_gap_ms}ms")
     tx_done.wait()
@@ -129,14 +130,14 @@ def main():
     running = False
     time.sleep(0.5)
 
-    # ── 收集 RX IQ ──
+    # -- 收集 RX IQ --
     rx_chunks = []
     while not rx_buf.empty():
         rx_chunks.append(rx_buf.get_nowait())
     rx_iq = np.concatenate(rx_chunks) if rx_chunks else np.array([], dtype=np.complex64)
     tx_bits = np.concatenate(tx_bits_list) if tx_bits_list else np.array([], dtype=np.int64)
 
-    # ── 保存 ──
+    # -- 保存 --
     iq_path = args.output + '_iq.npy'
     bits_path = args.output + '_bits.npy'
     meta_path = args.output + '_meta.json'
@@ -173,25 +174,25 @@ def main():
         json.dump(meta, f, indent=2, ensure_ascii=False)
     print(f"  元数据: {meta_path}")
 
-    # ── 信号质量诊断 ──
+    # -- 信号质量诊断 --
     mag = np.abs(rx_iq)
     peak = np.max(mag) if len(mag) > 0 else 0
     rms = np.sqrt(np.mean(mag**2)) if len(mag) > 0 else 0
     dur_ms = len(rx_iq) / SAMP_RATE * 1000
 
     print(f"\n[capture] 完成:")
-    print(f"  RX IQ: {len(rx_iq)} 样本 ({dur_ms:.0f}ms)  →  {iq_path}")
-    print(f"  TX bits: {len(tx_bits)} bits ({args.num_frames} unique ×{REPEAT} repeats ×{PAYLOAD_LEN})  →  {bits_path}")
+    print(f"  RX IQ: {len(rx_iq)} 样本 ({dur_ms:.0f}ms)  ->  {iq_path}")
+    print(f"  TX bits: {len(tx_bits)} bits ({args.num_frames} unique ×{REPEAT} repeats ×{PAYLOAD_LEN})  ->  {bits_path}")
     print(f"  幅度: peak={peak:.4f}  RMS={rms:.4f}  crest={peak/(rms+1e-30):.1f}")
     print(f"  overflow={overflow_count[0]}")
     if peak > 0.95:
-        print(f"  ⚠ 削峰! 建议降低 gain-rx 或 gain-tx")
+        print(f"  [WARN] 削峰! 建议降低 gain-rx 或 gain-tx")
     elif peak < 0.05:
-        print(f"  ⚠ 信号极弱! 检查 SMA 连接或提高增益")
+        print(f"  [WARN] 信号极弱! 检查 SMA 连接或提高增益")
     elif peak < 0.1:
-        print(f"  ⚠ 信号偏弱 (peak={peak:.3f}), 建议提高增益")
+        print(f"  [WARN] 信号偏弱 (peak={peak:.3f}), 建议提高增益")
     else:
-        print(f"  ✅ 信号幅度正常")
+        print(f"  [OK] 信号幅度正常")
 
     rx_stream.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
     usrp = None

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 snr_metrics.py — Unified SNR/CFO/EVM measurement (single source of truth)
 
@@ -20,9 +21,9 @@ Import convention:
 
 Reference formulas (matched to polar_loopback.py v2):
   - Sigma2:  s2 = max( sum(|noise|^2) / (RS_LEN - 1),  1e-30 )   [Welch]
-  - Coarse CFO:  Δf = -angle(P_peak) / (2π * L / fs)
+  - Coarse CFO:  Deltaf = -angle(P_peak) / (2pi * L / fs)
   - Fine CFO:    slope = linear_regression( unwrap(angle(r·conj(RS))) )
-                  Δf_fine = slope / (2π * Ts_sym)
+                  Deltaf_fine = slope / (2pi * Ts_sym)
   - EVM:  10*log10( sigma2 )   (sigma2 clipped to 0.5 for display)
   - LLR:  4 * Re(y_eq) / sigma2_out   where sigma2_out uses max(sigma2, 1e-6)
 """
@@ -57,7 +58,7 @@ def noise_floor_from_iq(iq, rrc, sps, rrc_delay, n_noise=50000):
 
 
 def _rrc_match(samples, rrc, sps, rrc_delay):
-    """RRC matched filter → symbol-rate output (internal)."""
+    """RRC matched filter -> symbol-rate output (internal)."""
     f = np.convolve(samples, rrc[::-1], mode='full')
     return f[rrc_delay::sps]
 
@@ -178,7 +179,7 @@ def fine_cfo_from_rs(symbols, rs_pos, ref_rs, coarse_cfo, ts_sym, rs_len=32):
     Steps:
       1. Pre-compensate coarse CFO on RS segment
       2. Compute rs_tone = rs_seg * conj(RS)
-      3. Unwrap phase → linear regression slope → fine CFO
+      3. Unwrap phase -> linear regression slope -> fine CFO
 
     Args:
         symbols:    (M,) complex64  RRC-matched symbols
@@ -204,7 +205,7 @@ def fine_cfo_from_rs(symbols, rs_pos, ref_rs, coarse_cfo, ts_sym, rs_len=32):
         pre_comp = np.exp(-1j * 2 * np.pi * coarse_cfo * (rs_pos + n_rs) * ts_sym)
         rs_seg = rs_seg * pre_comp
 
-    # Fine CFO: unwrap → linear regression slope
+    # Fine CFO: unwrap -> linear regression slope
     rs_tone = rs_seg * np.conj(ref_rs)
     rs_corr = float(np.abs(np.sum(rs_tone)))
     rs_phase = np.unwrap(np.angle(rs_tone))
@@ -226,15 +227,15 @@ def fine_cfo_from_rs(symbols, rs_pos, ref_rs, coarse_cfo, ts_sym, rs_len=32):
 
 def bpsk_llr(symbols, data_start, data_len, h, total_cfo, sigma2,
              ts_sym, llr_clip=20.0):
-    """BPSK soft demodulation → LLR.
+    """BPSK soft demodulation -> LLR.
 
     Matches polar_loopback.py lines 215-238.
 
     LLR = 4 * Re(y_eq) / sigma2_out
-    where y_eq = symbols * exp(-j·2π·Δf·t) / h
+    where y_eq = symbols * exp(-j·2pi·Deltaf·t) / h
     and sigma2_out = max(sigma2, 1e-6)
 
-    RS-estimated sigma2 is complex residual variance → real part variance = sigma2/2.
+    RS-estimated sigma2 is complex residual variance -> real part variance = sigma2/2.
     LLR = 2*y / (sigma2/2) = 4*y / sigma2.
 
     Args:

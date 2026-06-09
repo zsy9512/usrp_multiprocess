@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 loopback_analyze.py — 环回 IQ 逐帧精细分析 (离线调试同步链)
 
-方案: 全量 STF 扫描 → 聚类去重 → 逐候选帧完整同步链
+方案: 全量 STF 扫描 -> 聚类去重 -> 逐候选帧完整同步链
 
 用法:
   python tools/loopback_analyze.py capture/loopback_sma_v2
@@ -148,7 +149,7 @@ def b2i(b):
 
 def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
                               stf_energy=None, verbose=True, debug_n=0):
-    """全量 STF 扫描 → 聚类 → 逐候选帧同步链.
+    """全量 STF 扫描 -> 聚类 -> 逐候选帧同步链.
 
     对 IQ 分段做 STF 检测, 合并去重后逐候选位置验证 PSS+RS+解调.
     不依赖滑动窗口消费, 避免帧漏检.
@@ -157,7 +158,7 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
     if stf_energy is None:
         stf_energy = STF_MIN_ENERGY
 
-    # ── 标准 SNR 底噪: 从 IQ 开头静默期测量 (RX 先于 TX 启动) ──
+    # -- 标准 SNR 底噪: 从 IQ 开头静默期测量 (RX 先于 TX 启动) --
     n_noise = min(50000, n_total)
     noise_iq = iq[:n_noise]
     noise_syms = rrc_match(noise_iq)
@@ -166,7 +167,7 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
         print(f"  [scan] Noise floor (IQ prefix, {n_noise} samples): "
               f"{noise_floor:.6f}  ({10*np.log10(max(noise_floor, 1e-30)):.1f} dB)")
 
-    # ── 阶段 1: 全量 STF 检测 (分段处理以控制内存) ──
+    # -- 阶段 1: 全量 STF 检测 (分段处理以控制内存) --
     seg_size = 1_000_000
     overlap = FRAME_RRC_SAMPLES + 5000  # 帧+gap 长度, 确保帧不会被分割
     all_peaks, all_cfos, all_metrics = [], [], []
@@ -186,7 +187,7 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
     if verbose:
         print(f"  [scan] STF raw peaks: {len(all_peaks)}")
 
-    # ── 过滤离谱粗 CFO (同板 B210 < 2kHz) ──
+    # -- 过滤离谱粗 CFO (同板 B210 < 2kHz) --
     valid = [i for i, c in enumerate(all_cfos) if abs(c) < 2000]
     all_peaks  = [all_peaks[i] for i in valid]
     all_cfos   = [all_cfos[i] for i in valid]
@@ -194,14 +195,14 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
     if verbose:
         print(f"  [scan] after CFO filter: {len(all_peaks)}")
 
-    # ── 阶段 2: 全局聚类去重 ──
+    # -- 阶段 2: 全局聚类去重 --
     c_peaks, c_cfos, c_metrics = stf_cluster(all_peaks, all_cfos, all_metrics,
                                               win=FRAME_RRC_SAMPLES // 2)
 
     if verbose:
         print(f"  [scan] STF clustered: {len(c_peaks)} candidate frames")
 
-    # ── 阶段 3: 逐候选完整同步链 ──
+    # -- 阶段 3: 逐候选完整同步链 --
     frames = []
     for pi, (d, coarse_cfo) in enumerate(zip(c_peaks, c_cfos)):
         # 提取帧窗口
@@ -244,7 +245,7 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
             print(f"    -> OK  pk={pk} fs={fs} rp={rp}  "
                   f"ptm={ptm:.1f} pts={pts:.1f}  rs_corr={chan['rs_corr']:.1f}  "
                   f"cf0={chan['coarse_cfo']:+.0f} cf1={chan['fine_cfo']:+.0f}  "
-                  f"|h|={abs(chan['h']):.3f} σ²={chan['sigma2']:.4f}", flush=True)
+                  f"|h|={abs(chan['h']):.3f} sigma²={chan['sigma2']:.4f}", flush=True)
 
         # Header
         hdr_start = rp + RS_LEN
@@ -301,7 +302,7 @@ def analyze_frames_sequential(iq, tx_bits, pss_ptm_thr=3.5, pss_pts_thr=1.0,
             'payload_bits': payload,
         })
 
-    # ── 阶段 4: 按全局位置排序 + 去重 (同一帧可能被多个候选命中) ──
+    # -- 阶段 4: 按全局位置排序 + 去重 (同一帧可能被多个候选命中) --
     if frames:
         frames.sort(key=lambda f: f['global_pos'])
         # 去重: 相邻帧间距 < FRAME_RRC_SAMPLES/2 的只保留 CRC 更好的
@@ -422,9 +423,9 @@ def print_report(frames, tx_bits):
         if snrs and np.mean(snrs) < 15:
             issues.append(f"[WARN] SNR 偏低 ({np.mean(snrs):.1f}dB)")
         if cfo_totals and np.std(cfo_totals) > 30:
-            issues.append(f"[WARN] CFO 波动大 (σ={np.std(cfo_totals):.0f}Hz) → PSS定时跳变")
+            issues.append(f"[WARN] CFO 波动大 (sigma={np.std(cfo_totals):.0f}Hz) -> PSS定时跳变")
         if timing_offs and np.std(timing_offs) > 0.5:
-            issues.append(f"[WARN] 定时偏抖动 (σ={np.std(timing_offs):.2f}sym)")
+            issues.append(f"[WARN] 定时偏抖动 (sigma={np.std(timing_offs):.2f}sym)")
 
     if not issues:
         if crc_ok / max(n, 1) >= 0.95:
@@ -440,7 +441,7 @@ def print_report(frames, tx_bits):
     if failed and len(failed) <= 20:
         print(f"\n  【失败帧】(共 {len(failed)} 帧)")
         print(f"  {'idx':>4s}  {'ptm':>6s}  {'pts':>5s}  {'HDR':>4s}  "
-              f"{'SNR':>6s}  {'Δf0':>6s}  {'Δf1':>6s}  {'BER':>7s}")
+              f"{'SNR':>6s}  {'Deltaf0':>6s}  {'Deltaf1':>6s}  {'BER':>7s}")
         for f in failed[:10]:
             print(f"  {f['idx']:4d}  {f['ptm']:5.1f}  {f['pts']:4.1f}  "
                   f"{'OK' if f['hdr_ok'] else 'XX':>4s}  "
@@ -552,7 +553,7 @@ def plot_analysis(iq, frames, save_prefix=''):
     ax = fig.add_subplot(gs[1, 3])
     cfos = [f['total_cfo'] for f in frames]
     ax.bar(range(n), cfos, color=status, width=0.8)
-    ax.set_title(f'CFO (σ={np.std(cfos):.1f}Hz)')
+    ax.set_title(f'CFO (sigma={np.std(cfos):.1f}Hz)')
     ax.set_xlabel('Frame'); ax.set_ylabel('CFO (Hz)')
 
     # (d) 星座图
@@ -587,7 +588,7 @@ def plot_analysis(iq, frames, save_prefix=''):
     ax = fig.add_subplot(gs[3, 2:])
     toff = [f['timing_offset'] for f in frames]
     ax.bar(range(n), toff, color=status, width=0.8)
-    ax.set_title(f'定时偏 (σ={np.std(toff):.3f} sym)')
+    ax.set_title(f'定时偏 (sigma={np.std(toff):.3f} sym)')
     ax.set_xlabel('Frame'); ax.set_ylabel('offset (sym)')
 
     fig.suptitle(f'环回IQ分析  |  {n} frames  |  '
@@ -598,7 +599,7 @@ def plot_analysis(iq, frames, save_prefix=''):
     if save_prefix:
         out = f'{save_prefix}_analysis.png'
         fig.savefig(out, dpi=150)
-        print(f"图表已保存 → {out}")
+        print(f"图表已保存 -> {out}")
     plt.show()
 
 
@@ -611,7 +612,7 @@ def plot_compare(prefix_a, prefix_b, label_a='baseline', label_b='interference')
     matplotlib.rcParams['axes.unicode_minus'] = False
     import matplotlib.pyplot as plt
 
-    # ── 加载 ──
+    # -- 加载 --
     iq_a = np.load(prefix_a + '_iq.npy')
     iq_b = np.load(prefix_b + '_iq.npy')
     tx_a = tx_b = None
@@ -623,7 +624,7 @@ def plot_compare(prefix_a, prefix_b, label_a='baseline', label_b='interference')
     frames_a = analyze_frames_sequential(iq_a, tx_a, verbose=False)
     frames_b = analyze_frames_sequential(iq_b, tx_b, verbose=False)
 
-    # ── 收集全部均衡符号 (不分 CRC) ──
+    # -- 收集全部均衡符号 (不分 CRC) --
     all_syms_a = np.concatenate([f['constellation'] for f in frames_a]) if frames_a else np.array([])
     all_syms_b = np.concatenate([f['constellation'] for f in frames_b]) if frames_b else np.array([])
 
@@ -662,7 +663,7 @@ def plot_compare(prefix_a, prefix_b, label_a='baseline', label_b='interference')
     fig1.suptitle(f'时域波形对比: {label_a} vs {label_b}', fontsize=12, y=1.01)
     fig1.tight_layout()
     fig1.savefig(prefix_b + '_tdomain_compare.png', dpi=150, bbox_inches='tight')
-    print(f"时域对比图 → {prefix_b}_tdomain_compare.png")
+    print(f"时域对比图 -> {prefix_b}_tdomain_compare.png")
 
     # ==================================================================
     # 图 2: 星座图对比 (左右)
@@ -687,7 +688,7 @@ def plot_compare(prefix_a, prefix_b, label_a='baseline', label_b='interference')
     fig2.suptitle(f'星座图对比: {label_a} vs {label_b}', fontsize=12)
     fig2.tight_layout()
     fig2.savefig(prefix_b + '_const_compare.png', dpi=150, bbox_inches='tight')
-    print(f"星座对比图 → {prefix_b}_const_compare.png")
+    print(f"星座对比图 -> {prefix_b}_const_compare.png")
 
     plt.show()
 

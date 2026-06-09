@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 iq_recorder.py — B210 IQ 录制工具
 
@@ -23,7 +24,7 @@ def main():
     p.add_argument('-o', '--output', default='iq_capture.npy')
     args = p.parse_args()
 
-    print(f"录制: {args.freq/1e6:.3f}MHz  gain={args.gain}dB  {args.duration}s → {args.output}")
+    print(f"录制: {args.freq/1e6:.3f}MHz  gain={args.gain}dB  {args.duration}s -> {args.output}")
 
     import uhd
     dev_args = f'serial={args.serial}' if args.serial else ''
@@ -78,7 +79,7 @@ def main():
     print(f"完成: {len(iq)} 样本 ({len(iq)/args.rate:.3f}s)")
     print(f"  幅度: max={peak:.3f}  rms={np.sqrt(np.mean(np.abs(iq)**2)):.3f}" if len(iq) > 0 else "  空数据!")
     print(f"  overflow={overflow}")
-    print(f"  保存 → {args.output}")
+    print(f"  保存 -> {args.output}")
 
 
 if __name__ == '__main__':

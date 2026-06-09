@@ -2,7 +2,7 @@
 """
 polar_encode.py — 极化码编码器 (stdin/stdout 管道)
 
-  随机生成 128bit 信息位 → Arikan 极化编码 → 256bit 码字 → stdout
+  随机生成 128bit 信息位 -> Arikan 极化编码 -> 256bit 码字 -> stdout
 
 用法:
   python polar_encode.py --frames 100 | ./tx -o tx_iq.bin
@@ -10,7 +10,7 @@ polar_encode.py — 极化码编码器 (stdin/stdout 管道)
 """
 import argparse, os, sys, struct, numpy as np
 
-# ── 加载冻结比特掩膜 ──
+# -- 加载冻结比特掩膜 --
 MATRICES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'deploy', 'matrices')
 A_PATH = os.path.join(MATRICES_DIR, 'A.npy')
 if not os.path.isfile(A_PATH):
@@ -63,7 +63,7 @@ def main():
 
     if info_all:
         np.save(args.save_info, np.concatenate(info_all))
-        print(f"[encode] {args.frames} frames, info bits → {args.save_info}", file=sys.stderr)
+        print(f"[encode] {args.frames} frames, info bits -> {args.save_info}", file=sys.stderr)
 
 
 if __name__ == '__main__':
