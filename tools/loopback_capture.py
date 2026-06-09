@@ -95,21 +95,25 @@ def main():
     from sender import build_frame, rrc_filter
 
     gap = max(16, int(args.frame_gap_ms * SAMP_RATE / 1000))
+    REPEAT = 5                     # 每帧重复次数
+    GAP_REPEAT = int(0.003 * SAMP_RATE)  # 重复间隔 3ms → 3000 IQ 样本
     tx_done = threading.Event()
 
     def tx_thread():
         md_tx = uhd.types.TXMetadata(); md_tx.start_of_burst = True
+        gm = uhd.types.TXMetadata(); gm.start_of_burst = gm.end_of_burst = False
         # 固定种子保证可复现
         rng = np.random.RandomState(42)
         for f in range(args.num_frames):
             raw = rng.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
             tx_bits_list.append(raw)
             iq = rrc_filter(build_frame(raw, f), RRC, SPS)
-            tx_stream.send(iq.astype(np.complex64), md_tx)
-            md_tx.start_of_burst = False
+            for r in range(REPEAT):
+                tx_stream.send(iq.astype(np.complex64), md_tx)
+                md_tx.start_of_burst = False
+                if r < REPEAT - 1:
+                    tx_stream.send(np.zeros(GAP_REPEAT, dtype=np.complex64), gm)
             if gap > 0:
-                gm = uhd.types.TXMetadata()
-                gm.start_of_burst = gm.end_of_burst = False
                 tx_stream.send(np.zeros(gap, dtype=np.complex64), gm)
         eob = uhd.types.TXMetadata(); eob.end_of_burst = True
         tx_stream.send(np.zeros(1, dtype=np.complex64), eob)
@@ -118,7 +122,7 @@ def main():
     th.Thread(target=tx_thread, daemon=True).start()
 
     # ── 等待 TX 完成 + 额外 2s 收尾 ──
-    print(f"[capture] TX {args.num_frames} frames @ {args.freq/1e6:.1f}MHz  "
+    print(f"[capture] TX {args.num_frames} frames ×{REPEAT} repeats @ {args.freq/1e6:.1f}MHz  "
           f"TXgain={args.gain_tx}  RXgain={args.gain_rx}  gap={args.frame_gap_ms}ms")
     tx_done.wait()
     time.sleep(2)
@@ -177,7 +181,7 @@ def main():
 
     print(f"\n[capture] 完成:")
     print(f"  RX IQ: {len(rx_iq)} 样本 ({dur_ms:.0f}ms)  →  {iq_path}")
-    print(f"  TX bits: {len(tx_bits)} bits ({args.num_frames}×{PAYLOAD_LEN})  →  {bits_path}")
+    print(f"  TX bits: {len(tx_bits)} bits ({args.num_frames} unique ×{REPEAT} repeats ×{PAYLOAD_LEN})  →  {bits_path}")
     print(f"  幅度: peak={peak:.4f}  RMS={rms:.4f}  crest={peak/(rms+1e-30):.1f}")
     print(f"  overflow={overflow_count[0]}")
     if peak > 0.95:

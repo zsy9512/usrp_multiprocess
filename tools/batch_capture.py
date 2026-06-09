@@ -34,8 +34,8 @@ RX_ANTENNA   = "RX2"
 NUM_FRAMES   = 200
 FRAME_GAP_MS = 5.0
 
-# RX 增益扫参 (近似 SNR: 64→~30dB, 55→~20dB, 48→~15dB, 42→~10dB, 38→~5dB, 35→~0dB)
-DEFAULT_GAINS = [64, 55, 48, 42, 38, 35]
+# RX 增益扫参 (极低增益: tx=65 固定, rx=10-50 覆盖 SNR ~-15 到 ~+25 dB)
+DEFAULT_GAINS = [10, 15, 20, 25, 30, 35, 40, 45, 50]
 DEFAULT_RUNS  = 1          # 每档重复次数 (≥3 推荐做统计)
 
 
