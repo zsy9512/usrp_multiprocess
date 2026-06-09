@@ -31,8 +31,8 @@ class BurstInterferer:
     """突发干扰源: 逐符号 Bernoulli 判定, UHD 连续发射."""
 
     def __init__(self, samp_rate: float = SAMP_RATE, sps: int = SPS,
-                 p_b: float = 0.05, sigma_b: float = 2.0,
-                 sigma_bg: float = 0.001):
+                 p_b: float = 0.05, sigma_b: float = 0.002,
+                 sigma_bg: float = 0.00001):
         self.samp_rate = samp_rate
         self.sps = sps
         self.p_b = p_b
@@ -75,7 +75,7 @@ class BurstInterferer:
         return chunk, n_burst
 
     # ------------------------------------------------------------------
-    def start(self, freq: float = 915e6, gain: float = 50,
+    def start(self, freq: float = 915e6, gain: float = 20,
               serial: str = 'MyB210_01', duration: float = 0.0):
         """启动突发干扰发射.
 
@@ -167,14 +167,14 @@ def main():
     p = argparse.ArgumentParser(description='突发干扰源 (B210 UHD 直控)')
     p.add_argument('--serial', default='320F2BD', help='USRP 序列号')
     p.add_argument('--freq', type=float, default=915e6, help='中心频率 (Hz)')
-    p.add_argument('--gain', type=float, default=50, help='TX 增益 (dB)')
+    p.add_argument('--gain', type=float, default=20, help='TX 增益 (dB, 默认 20)')
     p.add_argument('--rate', type=float, default=SAMP_RATE, help='采样率 (Hz)')
     p.add_argument('--sps', type=int, default=SPS, help='每符号采样数')
     p.add_argument('--p-b', type=float, default=0.05, help='突发概率')
-    p.add_argument('--sigma-b', type=float, default=2.0,
-                   help='突发噪声标准差')
-    p.add_argument('--sigma-bg', type=float, default=0.001,
-                   help='背景平稳信号幅度')
+    p.add_argument('--sigma-b', type=float, default=0.002,
+                   help='突发噪声标准差 (默认 0.002, 等效 Eb/N0~0dB)')
+    p.add_argument('--sigma-bg', type=float, default=0.00001,
+                   help='背景平稳信号幅度 (默认 0.00001)')
     p.add_argument('--duration', type=float, default=0.0,
                    help='总时长 (s), 0=无限')
     args = p.parse_args()

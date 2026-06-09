@@ -327,7 +327,10 @@ def run_snr_sweep(snr_range, n_frames=200, seed=42,
                   stf_thr=0.4, stf_energy=0.01,
                   pss_ptm=2.5, pss_pts=1.0,
                   verbose=True):
-    """在指定 SNR 范围上测试同步链性能.
+    """在指定 SNR (Es/N0 符号域) 范围上测试同步链性能。
+
+    Eb/N0 = Es/N0 + 3dB (R=128/256=0.5).
+    如果用 --ebn0-range, CLI 自动减去 3dB 换算。
 
     Args:
         snr_range:  (snr_min, snr_max, snr_step)  dB, 符号域
@@ -414,7 +417,7 @@ def run_snr_sweep(snr_range, n_frames=200, seed=42,
 
         if verbose:
             bar = '#' * int(stats['detection_rate'] * 40)
-            print(f"  SNR={snr_db:5.1f} dB  "
+            print(f"  Eb/N0={snr_db+3.0:5.1f} dB  "
                   f"det={det_ok:4d}/{n_frames} ({stats['detection_rate']*100:5.1f}%)  "
                   f"STF={fails.get('STF',0):3d}  PSS={fails.get('PSS',0):3d}  "
                   f"RS={fails.get('RS',0):3d}  {bar}")
@@ -462,8 +465,8 @@ def compare_variants(snr_range=(-5, 20, 2), n_frames=200, cfo_mean=-2.4, cfo_std
             if snr90 is None and rates[i] >= 0.9:
                 snr90 = snrs[i]
 
-        print(f"    50%检出 @ SNR={snr50:.1f} dB" if snr50 else f"    50%检出: 未达到")
-        print(f"    90%检出 @ SNR={snr90:.1f} dB" if snr90 else f"    90%检出: 未达到")
+        print(f"    50%检出 @ Eb/N0={snr50+3.0:.1f} dB" if snr50 else f"    50%检出: 未达到")
+        print(f"    90%检出 @ Eb/N0={snr90+3.0:.1f} dB" if snr90 else f"    90%检出: 未达到")
         print(f"    耗时: {elapsed:.1f}s")
 
         all_results[v['label']] = {
@@ -691,7 +694,7 @@ def run_repeat_combine_sweep(snr_range, n_groups=50, seed=42,
 
         if verbose:
             bar = '#' * int(stats['detection_rate'] * 40)
-            print(f"  SNR={snr_db:5.1f} dB  "
+            print(f"  Eb/N0={snr_db+3.0:5.1f} dB  "
                   f"det={det_ok:4d}/{n_groups} ({stats['detection_rate']*100:5.1f}%)  "
                   f"STF={fails.get('STF',0):3d}  PSS={fails.get('PSS',0):3d}  "
                   f"RS={fails.get('RS',0):3d}  {bar}")
@@ -823,7 +826,7 @@ def run_anyof_repeat_sweep(snr_range, n_groups=50, seed=42,
 
         if verbose:
             bar = '#' * int(stats['detection_rate'] * 40)
-            print(f"  SNR={snr_db:5.1f} dB  "
+            print(f"  Eb/N0={snr_db+3.0:5.1f} dB  "
                   f"groups={groups_ok:4d}/{n_groups} ({stats['detection_rate']*100:5.1f}%)  "
                   f"avg_hits={stats['mean_hits_per_group']:.1f}/{n_repeats}  {bar}")
 
@@ -836,13 +839,13 @@ def run_anyof_repeat_sweep(snr_range, n_groups=50, seed=42,
 
 def main():
     p = argparse.ArgumentParser(
-        description='低 SNR 同步链设计 + SNR sweep 诊断')
+        description='低 SNR 同步链设计 + Eb/N0 sweep 诊断')
     p.add_argument('calib_json', nargs='?', default='',
-                   help='channel_params.json (可选, 用于提取 CFO 参数)')
-    p.add_argument('--snr-range', type=float, nargs=3, default=[-5, 15, 2],
-                   help='SNR sweep: min max step (默认 -5 15 2)')
+                   help='channel_params.json (可选, 用于提取 CFO/信道参数)')
+    p.add_argument('--ebn0-range', type=float, nargs=3, default=[-2, 23, 2],
+                   help='Eb/N0 sweep: min max step (默认 -2 23 2, R=0.5)')
     p.add_argument('--frames', type=int, default=200,
-                   help='每 SNR 点仿真帧数 (默认 200)')
+                   help='每 Eb/N0 点仿真帧数 (默认 200)')
     p.add_argument('--stf-reps', type=int, default=4,
                    help='STF 重复段数 (默认 4 -> 64 符号)')
     p.add_argument('--rs-len', type=int, default=32,
@@ -868,24 +871,35 @@ def main():
     p.add_argument('--seed', type=int, default=42)
     args = p.parse_args()
 
-    # 从标定文件加载 CFO 参数
+    # 从标定文件加载 CFO 参数 (只取 CFO 可靠的高增益档位)
     cfo_mean, cfo_std = args.cfo_mean, args.cfo_std
     if args.calib_json and os.path.isfile(args.calib_json):
         with open(args.calib_json, encoding='utf-8') as f:
             calib = json.load(f)
-        # channel_params.json 结构: {by_gain: {..., calibration: {channel_model: ...}}}
-        if 'calibration' in calib:
-            cm = calib['calibration']['channel_model']
+        cm = None
+        if 'by_gain' in calib:
+            # 从 by_gain 中取 CFO 标准差 < 30 Hz 的最高增益档 (可靠 CFO)
+            best_cfo_mean, best_cfo_std = None, None
+            for gain_str, stats in calib['by_gain'].items():
+                cfo_info = stats.get('cfo_hz', {})
+                cfo_s = cfo_info.get('std', 999)
+                if cfo_s is not None and cfo_s < 30:
+                    best_cfo_mean = cfo_info.get('mean')
+                    best_cfo_std = cfo_s
+            if best_cfo_mean is not None:
+                cfo_mean, cfo_std = best_cfo_mean, best_cfo_std
+        elif 'calibration' in calib:
+            cm = calib['calibration'].get('channel_model')
         elif 'channel_model' in calib:
             cm = calib['channel_model']
-        else:
-            cm = None
         if cm:
             cfo_mean = cm['cfo_hz']['mean']
             cfo_std = cm['cfo_hz']['std']
-            print(f"从标定加载 CFO: N({cfo_mean:.1f}, {cfo_std:.1f}) Hz")
+        print(f"CFO: N({cfo_mean:.1f}, {cfo_std:.1f}) Hz")
 
-    snr_range = tuple(args.snr_range)
+    # Eb/N0 -> Es/N0: SNR_sym = Eb/N0 - 3dB (R=0.5)
+    ebn0_range = tuple(args.ebn0_range)
+    snr_range = (ebn0_range[0] - 3.0, ebn0_range[1] - 3.0, ebn0_range[2])
 
     if args.compare:
         results = compare_variants(snr_range, args.frames, cfo_mean, cfo_std)
@@ -901,7 +915,7 @@ def main():
         print(f"{'='*70}")
 
         if args.mode == 'any':
-            print(f"  {'SNR':>6s}  {'groups':>7s}  {'rate':>7s}  {'hits/grp':>9s}")
+            print(f"  {'Eb/N0':>6s}  {'groups':>7s}  {'rate':>7s}  {'hits/grp':>9s}")
             print(f"  {'-'*40}")
             results = run_anyof_repeat_sweep(
                 snr_range, n_groups=args.frames, seed=args.seed,
@@ -913,7 +927,7 @@ def main():
                 pss_ptm=args.pss_ptm, pss_pts=args.pss_pts,
             )
         else:
-            print(f"  {'SNR':>6s}  {'det':>5s}  {'rate':>7s}  "
+            print(f"  {'Eb/N0':>6s}  {'det':>5s}  {'rate':>7s}  "
                   f"{'STF':>5s} {'PSS':>5s} {'RS':>5s}")
             print(f"  {'-'*45}")
             results = run_repeat_combine_sweep(
@@ -928,10 +942,10 @@ def main():
     else:
         stf_syms_count = args.stf_reps * 16
         print(f"\n{'='*70}")
-        print(f"SNR Sweep: STF={stf_syms_count}sym RS={args.rs_len}sym  "
+        print(f"Eb/N0 Sweep: STF={stf_syms_count}sym RS={args.rs_len}sym  "
               f"CFO=N({cfo_mean:.1f},{cfo_std:.1f})Hz")
         print(f"{'='*70}")
-        print(f"  {'SNR':>6s}  {'det':>5s}  {'rate':>7s}  "
+        print(f"  {'Eb/N0':>6s}  {'det':>5s}  {'rate':>7s}  "
               f"{'STF':>5s} {'PSS':>5s} {'RS':>5s}")
         print(f"  {'-'*45}")
 

@@ -80,7 +80,13 @@ def reconstruct_tx_waveform(frame_id, rng=None):
 # 全帧互相关帧检测 (处理增益 ~27 dB, 远优于 STF 延迟相关的 ~15 dB)
 # ═══════════════════════════════════════════════════════════════════════
 
-def full_frame_correlate(rx_iq, tx_iq_ref):
+def _fft_length(n):
+    """返回不小于 n 的 2 次幂长度, 用于 FFT 互相关。"""
+    return 1 << (int(n) - 1).bit_length()
+
+
+def full_frame_correlate(rx_iq, tx_iq_ref, rx_fft=None, n_fft=None,
+                         return_corr=True):
     """全帧互相关: 在 RX IQ 中搜索已知 TX 波形.
 
     互相关 = conv(rx, conj(tx_ref[::-1]))
@@ -89,17 +95,40 @@ def full_frame_correlate(rx_iq, tx_iq_ref):
     Args:
         rx_iq:      (N,) complex64  接收 IQ
         tx_iq_ref:  (M,) complex64  参考 TX IQ (单帧)
+        rx_fft:     optional  预计算 FFT(rx_iq, n_fft), 批量测量时复用
+        n_fft:      optional  FFT 长度, 必须 >= N + M - 1
+        return_corr: bool  是否返回完整相关幅度数组
 
     Returns:
-        corr:       (N-M+1,) float32  互相关幅度
+        corr:       (N-M+1,) float32 或 None  互相关幅度
         best_pos:   int  最佳匹配位置 (样本索引)
         best_val:   float  峰值相关值
     """
+    n_rx = len(rx_iq)
+    n_ref = len(tx_iq_ref)
+    valid_len = n_rx - n_ref + 1
+    if valid_len <= 0:
+        empty = np.empty(0, dtype=np.float32) if return_corr else None
+        return empty, -1, 0.0
+
     tx_rev = np.conj(tx_iq_ref[::-1])
-    corr = np.abs(np.convolve(rx_iq, tx_rev, mode='valid'))
-    best_pos = int(np.argmax(corr))
-    best_val = float(corr[best_pos])
-    return corr.astype(np.float32), best_pos, best_val
+    conv_len = n_rx + n_ref - 1
+    if n_fft is None or n_fft < conv_len:
+        n_fft = _fft_length(conv_len)
+        rx_fft = None
+    elif rx_fft is not None and len(rx_fft) != n_fft:
+        rx_fft = None
+    if rx_fft is None:
+        rx_fft = np.fft.fft(rx_iq, n_fft)
+
+    tx_fft = np.fft.fft(tx_rev, n_fft)
+    full = np.fft.ifft(rx_fft * tx_fft)
+    corr_abs = np.abs(full[n_ref - 1:n_ref - 1 + valid_len])
+    best_pos = int(np.argmax(corr_abs))
+    best_val = float(corr_abs[best_pos])
+
+    corr = corr_abs.astype(np.float32) if return_corr else None
+    return corr, best_pos, best_val
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -268,12 +297,18 @@ def measure_channel(iq_path, num_frames=200, seed=42,
     per_frame = []
     guard_pos = STF_LEN + PSS_LEN + RS_LEN + HEADER_LEN + PAYLOAD_LEN + PAYLOAD_CRC_LEN
 
+    # 每帧参考长度固定, 同一 capture 的 RX FFT 可复用。
+    ref_len = FRAME_RRC_SAMPLES
+    n_fft = _fft_length(n_total + ref_len - 1)
+    rx_fft = np.fft.fft(rx_iq, n_fft)
+
     for fid in range(num_frames):
         # 重建 TX 波形
         tx_iq_ref, tx_bits_ref, tx_syms_ref = reconstruct_tx_waveform(fid, rng)
 
         # 全帧互相关 -> 帧位置
-        corr, best_pos, best_val = full_frame_correlate(rx_iq, tx_iq_ref)
+        _, best_pos, best_val = full_frame_correlate(
+            rx_iq, tx_iq_ref, rx_fft=rx_fft, n_fft=n_fft, return_corr=False)
         if best_val < min_corr_peak:
             continue
 

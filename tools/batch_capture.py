@@ -4,39 +4,31 @@
 batch_capture.py — 批量 SNR sweep 采集 (一键跑完所有增益档位)
 
 用法:
-  python tools/batch_capture.py                          # 默认全扫
+  python tools/batch_capture.py                          # 默认 v1 全扫
+  python tools/batch_capture.py --v2                     # v2 长前导 + 30ms 帧间隔
   python tools/batch_capture.py --gains 64 55 48         # 指定增益
   python tools/batch_capture.py --runs 3                 # 每档重复3次
   python tools/batch_capture.py --dry-run                # 只打印命令, 不执行
 
-输出目录:
-  capture/YYYYMMDD/
-    snr_gain064_r0_iq.npy   snr_gain064_r0_bits.npy   snr_gain064_r0_meta.json
-    snr_gain064_r0_stats.json
-    snr_gain055_r0_iq.npy   ...
-    ...
-    summary.json                                          # 汇总所有采集结果
-
-依赖:
-  tools/loopback_capture.py  (采集 IQ)
-  tools/loopback_analyze.py  (离线分析)
-  tools/verify_calibration.py (口径验证)
+v1 vs v2:
+  v1: STF=64 RS=32 gap=5ms   (loopback_capture.py)
+  v2: STF=128 RS=64 gap=30ms (loopback_capture_v2.py, 极化编码)
 """
 
 import argparse, json, os, subprocess, sys, time
 from datetime import datetime, timezone
 
-# -- 默认配置 (对齐 polar_loopback.py / loopback_test.py) --
+# -- 默认配置 --
 SERIAL       = "320F33F"
 FREQ         = 915e6
-GAIN_TX      = 65
-RX_CHANNEL   = 1          # 0=A板TX/RX, 1=A板RX2, 2=B板TX/RX, 3=B板RX2
+GAIN_TX      = 60
+RX_CHANNEL   = 1
 RX_ANTENNA   = "RX2"
 NUM_FRAMES   = 200
-FRAME_GAP_MS = 5.0
+FRAME_GAP_MS = 5.0           # v1 default, v2 overrides to 30ms
 
-# RX 增益扫参 (极低增益: tx=65 固定, rx=10-50 覆盖 SNR ~-15 到 ~+25 dB)
-DEFAULT_GAINS = [10, 15, 20, 25, 30, 35, 40, 45, 50]
+# RX 增益扫参 (TX=60 固定, RX=21~40 覆盖 Eb/N0 0-25 dB)
+DEFAULT_GAINS = [21, 23, 25,27, 30,40]
 DEFAULT_RUNS  = 1          # 每档重复次数 (≥3 推荐做统计)
 
 
@@ -65,6 +57,8 @@ def main():
                    help=f"RX 天线端口 (默认 {RX_ANTENNA})")
     p.add_argument("--gains", type=int, nargs="+", default=DEFAULT_GAINS,
                    help=f"RX 增益列表 (默认 {DEFAULT_GAINS})")
+    p.add_argument('--v2', action='store_true',
+                   help='使用 v2 capture (STF=128 RS=64 gap=30ms 极化编码)')
     p.add_argument("--runs", type=int, default=DEFAULT_RUNS,
                    help=f"每档重复次数 (默认 {DEFAULT_RUNS})")
     p.add_argument("--num-frames", type=int, default=NUM_FRAMES)
@@ -82,7 +76,12 @@ def main():
     print(f"输出目录: {outdir}/")
 
     BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    CAPTURE_SCRIPT = os.path.join(BASE, "tools", "loopback_capture.py")
+    if args.v2:
+        CAPTURE_SCRIPT = os.path.join(BASE, "tools", "loopback_capture_v2.py")
+        frame_gap = args.frame_gap_ms if args.frame_gap_ms != 5.0 else 30.0
+    else:
+        CAPTURE_SCRIPT = os.path.join(BASE, "tools", "loopback_capture.py")
+        frame_gap = args.frame_gap_ms
     ANALYZE_SCRIPT = os.path.join(BASE, "tools", "analyze_repeat_capture.py")
 
     results = []
@@ -106,7 +105,7 @@ def main():
                 "--rx-channel", str(args.rx_channel),
                 "--rx-antenna", args.rx_antenna,
                 "--num-frames", str(args.num_frames),
-                "--frame-gap-ms", str(args.frame_gap_ms),
+                "--frame-gap-ms", str(frame_gap),
                 "-o", prefix,
             ]
             rc, stdout, stderr = run_cmd(cmd, dry_run=args.dry_run)
