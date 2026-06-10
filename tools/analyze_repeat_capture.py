@@ -29,14 +29,14 @@ from phy_params import (SPS, PSS as PSS_REF, RRC,
                         RRC_DELAY_SAMPLES, STF_DELAY,
                         FRAME_RRC_SAMPLES,
                         crc16, bits_to_bytes, bytes_to_bits)
+from polar_mask import load_frozen_mask
 
 SAMP_RATE = 1e6
 REPEAT = 5
 GAP_REPEAT_IQ = int(0.003 * SAMP_RATE)  # 3000
 GAP_GROUP_IQ  = int(0.005 * SAMP_RATE)  # 5000
 
-FROZEN_PATH = os.path.join(BASE, 'deploy', 'matrices', 'A.npy')
-FROZEN_MASK = np.load(FROZEN_PATH).astype(np.int64).squeeze()
+FROZEN_MASK = load_frozen_mask(BASE)
 
 
 def make_stf(n_reps=8, base_len=16):

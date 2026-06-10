@@ -25,6 +25,7 @@ sys.path.insert(0, BASE)
 from phy_params import (SPS, PSS as PSS_REF, RRC,
                         PSS_LEN, HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN,
                         GUARD_SYMBOLS, RRC_DELAY_SAMPLES)
+from polar_mask import load_frozen_mask
 
 SAMP_RATE = 1e6
 TS_SYM = SPS / SAMP_RATE
@@ -32,8 +33,7 @@ N_POLAR = 256
 K_POLAR = 128
 REPEAT = 5
 
-FROZEN_PATH = os.path.join(BASE, 'deploy', 'matrices', 'A.npy')
-FROZEN_MASK = np.load(FROZEN_PATH).astype(np.int64).squeeze()
+FROZEN_MASK = load_frozen_mask(BASE)
 LLR_CLIP = 20.0
 
 

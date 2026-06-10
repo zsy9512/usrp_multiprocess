@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from phy_params import SPS, RRC, PSS_LEN
 from phy_params import HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN, GUARD_SYMBOLS
 from phy_params import crc16, bits_to_bytes, bytes_to_bits
+from polar_mask import load_frozen_mask
 
 SAMP_RATE = 1e6
 
@@ -30,8 +31,7 @@ SAMP_RATE = 1e6
 N_POLAR = 256
 K_POLAR = 128
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FROZEN_PATH = os.path.join(BASE_DIR, 'deploy', 'matrices', 'A.npy')
-FROZEN_MASK = np.load(FROZEN_PATH).astype(np.int64).squeeze()
+FROZEN_MASK = load_frozen_mask(BASE_DIR)
 
 
 def _polar_encode(u):
