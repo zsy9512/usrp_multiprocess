@@ -26,5 +26,11 @@ __pycache__/
 *.jpg
 *.jpeg
 
+# Standalone offline package runtime assets
+!offline-polar-loopback/deploy/checkpoint/
+!offline-polar-loopback/deploy/checkpoint/*.pt
+!offline-polar-loopback/deploy/matrices/
+!offline-polar-loopback/deploy/matrices/*.npy
+
 capture/
 deploy/checkpoint/
