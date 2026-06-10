@@ -2,7 +2,6 @@
 phy_params.py — PHY 层统一参数 + CRC16
 
 所有帧结构、参考序列、滤波器参数集中于此。
-sender / receiver / test 共用。
 """
 from __future__ import annotations
 
@@ -15,17 +14,17 @@ SPS = 2                     # 每符号采样数
 ROLLOFF = 0.35              # RRC 滚降系数
 RRC_NUM_SYM = 10            # RRC 滤波器单边符号长度
 
-# STF: 4×16 重复 BPSK -> 延迟相关粗捕获 (免疫大频偏)
+# STF: 8×16 重复 BPSK -> 延迟相关粗捕获 (免疫大频偏)
 STF_REP = 16                # 每段长度 (延迟相关间距 L)
-STF_NUM = 4                 # 重复段数
-STF_LEN = STF_REP * STF_NUM # 64 符号
+STF_NUM = 8                 # 重复段数
+STF_LEN = STF_REP * STF_NUM # 128 符号
 
 # PSS: Zadoff-Chu -> 精定时 + 相关确认
 PSS_LEN = 64
 PSS_U = 25
 
 # RS: 已知 BPSK -> 细 CFO + 公共相位 + 信道/噪声估计
-RS_LEN = 32
+RS_LEN = 64
 
 # Header: 预留信息 (后续 MCS/length/ID) + CRC16
 HEADER_LEN = 32
@@ -42,7 +41,7 @@ GUARD_SYMBOLS = 32
 # 帧总符号数
 FRAME_SYMBOLS = (STF_LEN + PSS_LEN + RS_LEN +
                  HEADER_LEN + PAYLOAD_LEN + PAYLOAD_CRC_LEN +
-                 GUARD_SYMBOLS)   # = 64+64+32+32+256+16+32 = 496
+                 GUARD_SYMBOLS)   # = 128+64+64+32+256+16+32 = 592
 
 # RRC 延迟 (样本域)
 RRC_DELAY_SAMPLES = RRC_NUM_SYM * SPS  # 20 samples
@@ -88,20 +87,20 @@ PSS_PEAK_TO_MEAN_THR = 4.0
 PSS_PEAK_TO_SECOND_THR = 1.5
 
 # PSS 搜索窗口 (样本域, 围绕 STF 粗位置)
-PSS_SEARCH_WIN_SAMPLES = STF_LEN * SPS  # 128
+PSS_SEARCH_WIN_SAMPLES = STF_LEN * SPS  # 256
 
 # 检测推进步长
-ADVANCE_SAMPLES = (PSS_LEN + RS_LEN + HEADER_LEN) * SPS  # ~224
+ADVANCE_SAMPLES = (PSS_LEN + RS_LEN + HEADER_LEN) * SPS  # 320
 
 # 帧样本总长 (含 RRC 卷积溢出: mode='full' -> len + len(rrc) - 1)
 RRC_OUT_EXTRA = RRC_NUM_SYM * SPS  # = 20
-FRAME_RRC_SAMPLES = FRAME_SYMBOLS * SPS + RRC_OUT_EXTRA  # = 1012
+FRAME_RRC_SAMPLES = FRAME_SYMBOLS * SPS + RRC_OUT_EXTRA  # = 1204
 
 # 最小处理窗口
 MIN_WIN_SAMPLES = FRAME_RRC_SAMPLES + PSS_SEARCH_WIN_SAMPLES
 
 # ======================================================================
-# 参考序列生成 (固定种子, 确保 sender/receiver 一致)
+# 参考序列生成 (固定种子, 确保 TX/RX/离线分析一致)
 # ======================================================================
 
 _RNG_STF = np.random.RandomState(7)
@@ -109,7 +108,7 @@ _RNG_RS  = np.random.RandomState(13)
 
 
 def gen_stf() -> np.ndarray:
-    """STF: 4×16 重复 BPSK (+1,-1)."""
+    """STF: 8×16 重复 BPSK (+1,-1)."""
     base = 2 * _RNG_STF.randint(0, 2, STF_REP) - 1
     return np.tile(base, STF_NUM).astype(np.complex64)
 
@@ -210,7 +209,7 @@ def bytes_to_bits(data: np.ndarray, n_bits: int) -> np.ndarray:
 
 
 # ======================================================================
-# 预生成全局参考序列 (模块加载时生成, 供 sender/receiver 直接引用)
+# 预生成全局参考序列 (模块加载时生成, 供采集/分析/译码直接引用)
 # ======================================================================
 STF  = gen_stf()
 PSS  = gen_pss()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-batch_capture.py — 批量 SNR sweep 采集 (长前导 + 极化码)
+batch_capture.py — 批量 SNR sweep 采集 (Polar 重复帧)
 
 用法:
   python tools/batch_capture.py
@@ -10,7 +10,7 @@ batch_capture.py — 批量 SNR sweep 采集 (长前导 + 极化码)
   python tools/batch_capture.py --dry-run
 
 固定使用 loopback_capture.py:
-  STF=128 RS=64 gap=30ms 极化编码 5x repeat capture
+  STF=128 RS=64 group gap=30ms 极化编码 5x 重复帧 capture
 """
 
 import argparse, json, os, subprocess, sys, time
@@ -45,7 +45,7 @@ def run_cmd(cmd, dry_run=False):
 
 
 def main():
-    p = argparse.ArgumentParser(description="批量 SNR sweep IQ 采集 (长前导 + 极化码)")
+    p = argparse.ArgumentParser(description="批量 SNR sweep IQ 采集 (Polar 重复帧)")
     p.add_argument("--serial", default=SERIAL)
     p.add_argument("--freq", type=float, default=FREQ)
     p.add_argument("--gain-tx", type=float, default=GAIN_TX)

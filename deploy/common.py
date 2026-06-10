@@ -1,10 +1,8 @@
 """
-common.py — Self-contained utilities for USRP-based polar code deployment.
+common.py — SGNN 译码器部署模块。
 
-Copy this file together with sender.py / receiver.py / interferer.py
-to any machine.  Dependencies: numpy, torch.  torch-scatter is NOT required.
-
-Paths to matrices/ and model checkpoint are configurable via CLI or env vars.
+提供 Polar 编码辅助函数、Tanner graph 构造、SGNN 模型结构和 checkpoint 加载。
+运行依赖 numpy 与 torch；消息聚合使用本文件内的 scatter_sum 实现，不依赖 torch-scatter。
 """
 from __future__ import annotations
 
@@ -109,7 +107,7 @@ def scatter_sum(src: Tensor, index: Tensor, dim_size: int) -> Tensor:
 
 
 # ======================================================================
-# 5.  BPConv  —  message-propagation layer  (self-contained copy)
+# 5.  BPConv  —  message-propagation layer
 # ======================================================================
 
 class BPConv(nn.Module):
@@ -183,7 +181,7 @@ class BPConv(nn.Module):
 
 
 # ======================================================================
-# 6.  LSTU variants  —  A-matrix  (self-contained copy)
+# 6.  LSTU variants  —  A-matrix
 # ======================================================================
 
 class PassThrough(nn.Module):
@@ -258,7 +256,7 @@ _LSTU_MAP = {
 
 
 # ======================================================================
-# 7.  SGNN  model  (self-contained)
+# 7.  SGNN  model
 # ======================================================================
 
 class SGNN(nn.Module):

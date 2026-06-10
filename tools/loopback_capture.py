@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-loopback_capture.py — 长前导 + 极化码 USRP 采集 (离线分析用)
+loopback_capture.py — Polar 重复帧 USRP 采集 (离线分析用)
 
 默认帧配置:
   - STF=128 (8x16), RS=64
@@ -23,7 +23,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from phy_params import SPS, RRC, PSS_LEN
 from phy_params import HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN, GUARD_SYMBOLS
 from phy_params import crc16, bits_to_bytes, bytes_to_bits
-from polar_mask import load_frozen_mask
 
 SAMP_RATE = 1e6
 
@@ -31,7 +30,9 @@ SAMP_RATE = 1e6
 N_POLAR = 256
 K_POLAR = 128
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FROZEN_MASK = load_frozen_mask(BASE_DIR)
+FROZEN_MASK = np.load(
+    os.path.join(BASE_DIR, 'deploy', 'matrices', 'A.npy')
+).astype(np.int64).squeeze()
 
 
 def _polar_encode(u):
@@ -65,7 +66,7 @@ def make_rs(n_syms=64):
 
 
 def build_frame(data_bits, frame_id, stf_syms, pss_syms, rs_syms):
-    """构建长前导 Polar 帧。"""
+    """构建 Polar 重复帧。"""
     payload_bytes = bits_to_bytes(data_bits)
     payload_crc = crc16(payload_bytes)
     crc_bits = bytes_to_bits(
@@ -99,7 +100,7 @@ def rrc_pulse(symbols, rrc, sps):
 
 
 def main():
-    p = argparse.ArgumentParser(description='B210 自发自收 IQ 采集 (长前导 + 极化码)')
+    p = argparse.ArgumentParser(description='B210 自发自收 IQ 采集 (Polar 重复帧)')
     p.add_argument('--serial', default='320F33F')
     p.add_argument('--rx-channel', type=int, default=1)
     p.add_argument('--rx-antenna', default='RX2')
@@ -239,7 +240,7 @@ def main():
 
     meta = {
         'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-        'version': 'polar_long_preamble',
+        'version': 'polar_loopback',
         'freq_hz': args.freq,
         'gain_tx_db': args.gain_tx,
         'gain_rx_db': args.gain_rx,

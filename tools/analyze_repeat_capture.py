@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-analyze_repeat_capture.py — 分析 5x 重复帧 capture (any-of-N 检出 + frame_id 去重)
+analyze_repeat_capture.py — 分析 5x Polar 重复帧 capture (any-of-N 检出 + frame_id 去重)
 
 对应 loopback_capture.py 的 REPEAT=5 发送模式:
-  每组 5 帧完全相同 (frame_id 相同), 间隔 3ms, 组间 5ms.
+  每组 5 帧完全相同 (frame_id 相同), 重复间隔 5ms, 组间隔 30ms.
   接收端对每组 5 帧独立跑 STF->PSS->RS 同步,
   任意一帧通过 -> 组检出成功, 用 frame_id 去重.
 
@@ -27,16 +27,16 @@ from phy_params import (SPS, PSS as PSS_REF, RRC,
                         HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN,
                         GUARD_SYMBOLS, FRAME_SYMBOLS,
                         RRC_DELAY_SAMPLES, STF_DELAY,
-                        FRAME_RRC_SAMPLES,
-                        crc16, bits_to_bytes, bytes_to_bits)
-from polar_mask import load_frozen_mask
+                        FRAME_RRC_SAMPLES)
 
 SAMP_RATE = 1e6
 REPEAT = 5
-GAP_REPEAT_IQ = int(0.003 * SAMP_RATE)  # 3000
-GAP_GROUP_IQ  = int(0.005 * SAMP_RATE)  # 5000
+GAP_REPEAT_IQ = int(0.005 * SAMP_RATE)  # 5000
+GAP_GROUP_IQ  = int(0.030 * SAMP_RATE)  # 30000
 
-FROZEN_MASK = load_frozen_mask(BASE)
+FROZEN_MASK = np.load(
+    os.path.join(BASE, 'deploy', 'matrices', 'A.npy')
+).astype(np.int64).squeeze()
 
 
 def make_stf(n_reps=8, base_len=16):
@@ -48,37 +48,6 @@ def make_stf(n_reps=8, base_len=16):
 def make_rs(n_syms=64):
     rng = np.random.RandomState(13)
     return (2 * rng.randint(0, 2, n_syms) - 1).astype(np.complex64)
-
-
-def rrc_filter(symbols, rrc, sps):
-    up = np.zeros(len(symbols) * sps, dtype=np.complex64)
-    up[::sps] = symbols
-    return np.convolve(up, rrc, mode='full').astype(np.complex64)
-
-
-def build_custom_frame(data_bits, frame_id, stf_syms, pss_syms, rs_syms):
-    payload_crc = crc16(bits_to_bytes(data_bits))
-    crc_bits = bytes_to_bits(
-        np.array([(payload_crc >> 8) & 0xFF, payload_crc & 0xFF], dtype=np.uint8), 16)
-    id_bytes = np.array([(frame_id >> 8) & 0xFF, frame_id & 0xFF], dtype=np.uint8)
-    id_bits = bytes_to_bits(id_bytes, 16)
-    header_crc = crc16(id_bytes)
-    header_crc_bits = bytes_to_bits(
-        np.array([(header_crc >> 8) & 0xFF, header_crc & 0xFF], dtype=np.uint8), 16)
-    header_bits = np.concatenate([id_bits, header_crc_bits])
-
-    def _bpsk(bits):
-        return (1.0 - 2.0 * bits).astype(np.float32)
-
-    return np.concatenate([
-        stf_syms.astype(np.complex64),
-        pss_syms.astype(np.complex64),
-        rs_syms.astype(np.complex64),
-        _bpsk(header_bits).astype(np.complex64),
-        _bpsk(data_bits).astype(np.complex64),
-        _bpsk(crc_bits).astype(np.complex64),
-        np.zeros(GUARD_SYMBOLS, dtype=np.complex64),
-    ])
 
 
 def pss_correlate_custom(syms, pss_ref):
@@ -293,12 +262,12 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0,
         with open(meta_path, encoding='utf-8') as f:
             meta = json.load(f)
 
-    # 帧间隔从 meta 读取 (短前导: 5ms/3ms, 长前导 Polar: 30ms/5ms)
-    gap_group_ms = meta.get('frame_gap_ms', 5.0)
-    gap_repeat_ms = meta.get('gap_repeat_ms', 3.0)
+    # 帧间隔从 meta 读取 (Polar 重复帧默认: 30ms/5ms)
+    gap_group_ms = meta.get('frame_gap_ms', 30.0)
+    gap_repeat_ms = meta.get('gap_repeat_ms', 5.0)
     GAP_GROUP_IQ  = int(gap_group_ms * SAMP_RATE / 1000)
     GAP_REPEAT_IQ = int(gap_repeat_ms * SAMP_RATE / 1000)
-    # STF/RS 长度也从 meta 读 (短前导: 64/32, 长前导 Polar: 128/64)
+    # STF/RS 长度也从 meta 读 (默认: STF=128, RS=64)
     stf_len_sym = meta.get('stf_syms', STF_LEN)
     rs_len_sym  = meta.get('rs_syms', RS_LEN)
 
@@ -313,33 +282,11 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0,
 
     # TX 时序: [pad] [F0×5 + gaps] [GAP_GROUP] [F1×5 + gaps] ...
     # RX 开始采集早于 TX (~1s), 第一帧起始约在 IQ 开头后 50000 样本
-    # 用全帧互相关定位第一帧 (与 channel_measure.py 相同)
-    # 检测长前导 Polar 编码帧
-    use_polar = stf_len_sym > 64 or rs_len_sym > 32
-
+    # 用全帧互相关定位第一帧。
     # TX 时序定位
     rng = np.random.RandomState(42)
-    if use_polar:
-        # Polar capture: rng.rand(K_POLAR) 而不是 rng.randint
-        from tools.loopback_capture import build_frame, rrc_pulse
-        import math
-        def _polar_enc(u):
-            cw = u.copy().ravel()
-            for stage in range(1, int(math.log2(256)) + 1):
-                sep = 256 // (1 << stage)
-                for j in range(256):
-                    if (j // sep) % 2 == 0:
-                        cw[j] = (cw[j] + cw[j + sep]) % 2
-            return cw
-        info = (rng.rand(128) < 0.5).astype(np.int64)
-        u = np.zeros(256, dtype=np.int64)
-        u[FROZEN_MASK.astype(bool)] = info
-        coded = _polar_enc(u)
-        tx_iq_ref = rrc_pulse(
-            build_frame(coded, 0, stf_syms, pss_syms, rs_syms),
-            RRC, SPS).astype(np.complex64)
-    else:
-        tx_iq_ref, _, _ = __reconstruct_first_frame(rng, stf_syms, pss_syms, rs_syms)
+    tx_iq_ref, _, _ = _reconstruct_polar_frame(
+        rng, 0, stf_syms, pss_syms, rs_syms)
 
     # 全帧互相关找 frame0，并回溯到 group0/repeat0
     tx_rev = np.conj(tx_iq_ref[::-1])
@@ -403,7 +350,7 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0,
         hits_per_group.append(n_hits)
         total_groups += 1
 
-    # --- 全帧信道测量 (oracle-based, 独立于同步链) ---
+    # --- 全帧信道测量 (oracle-based, 不依赖同步链) ---
     oracle_h_mag, oracle_cfo, oracle_phase = [], [], []
     oracle_r2 = []
     oracle_rng = np.random.RandomState(42)  # 每帧独立重建
@@ -412,8 +359,7 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0,
             REPEAT * frame_iq_len + (REPEAT - 1) * GAP_REPEAT_IQ + GAP_GROUP_IQ)
         om = _oracle_measure_one_frame(iq, group_offset, frame_iq_len,
                                        oracle_rng, gi,
-                                       stf_syms, pss_syms, rs_syms,
-                                       use_polar=use_polar)
+                                       stf_syms, pss_syms, rs_syms)
         if om is not None:
             oracle_h_mag.append(om['h_mag'])
             oracle_cfo.append(om['cfo_hz'])
@@ -470,12 +416,27 @@ def analyze_capture(prefix, num_frames=40, pss_ptm=2.5, pss_pts=1.0,
     }
 
 
-def __reconstruct_first_frame(rng, stf_syms, pss_syms, rs_syms):
-    """重建 frame_id=0 的 TX IQ (用于全帧互相关定位)."""
-    raw = rng.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
-    frame_syms = build_custom_frame(raw, 0, stf_syms, pss_syms, rs_syms)
-    tx_iq = rrc_filter(frame_syms, RRC, SPS)
-    return tx_iq.astype(np.complex64), raw, frame_syms
+def _reconstruct_polar_frame(rng, frame_id, stf_syms, pss_syms, rs_syms):
+    """重建指定 frame_id 的 Polar TX IQ。"""
+    from tools.loopback_capture import build_frame, rrc_pulse
+    import math
+
+    def _polar_encode(u):
+        cw = u.copy().ravel()
+        for stage in range(1, int(math.log2(256)) + 1):
+            sep = 256 // (1 << stage)
+            for j in range(256):
+                if (j // sep) % 2 == 0:
+                    cw[j] = (cw[j] + cw[j + sep]) % 2
+        return cw
+
+    info = (rng.rand(128) < 0.5).astype(np.int64)
+    u = np.zeros(256, dtype=np.int64)
+    u[FROZEN_MASK.astype(bool)] = info
+    coded = _polar_encode(u)
+    frame_syms = build_frame(coded, frame_id, stf_syms, pss_syms, rs_syms)
+    tx_iq = rrc_pulse(frame_syms, RRC, SPS)
+    return tx_iq.astype(np.complex64), coded, frame_syms
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -579,14 +540,14 @@ def plot_iq_waveform(prefix, result, num_frames=40, save_path='', show=False,
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 全帧信道测量 (oracle-based, 独立于同步链)
+# 全帧信道测量 (oracle-based, 不依赖同步链)
 # ═══════════════════════════════════════════════════════════════════════
 
 TS_SYM = SPS / SAMP_RATE
 
 
 def _oracle_frame_cfo(rx_syms, tx_syms_ref, ts_sym=TS_SYM):
-    """全帧 496 符号线性相位拟合 -> CFO + 初始相位。"""
+    """全帧 592 符号线性相位拟合 -> CFO + 初始相位。"""
     mask = np.abs(tx_syms_ref) > 0.01
     if np.sum(mask) < 10:
         return 0.0, 0.0, 0.0
@@ -621,37 +582,15 @@ def _oracle_frame_channel(rx_syms, tx_syms_ref, cfo_hz, phase_0, ts_sym=TS_SYM):
 
 
 def _oracle_measure_one_frame(iq, expected_offset, frame_iq_len, rng, frame_id,
-                               stf_syms, pss_syms, rs_syms, use_polar=False):
+                               stf_syms, pss_syms, rs_syms):
     """对一帧做全帧信道测量 (已知帧 + 时域相关搜索).
 
-    独立于 PSS+RS 同步链。
-    use_polar=True: 模拟 Polar 编码负载, RNG 调用匹配 loopback_capture.
+    不依赖 PSS+RS 同步链。
+    RNG 调用匹配 loopback_capture.
     Returns dict 或 None (如果找不到帧或信号过弱).
     """
-    if use_polar:
-        # 匹配 loopback_capture.py 的 RNG 调用序列:
-        # rng.rand(K_POLAR) -> polar_encode -> build_frame
-        N_POLAR = 256; K_POLAR = 128
-        import math
-        def _polar_encode(u):
-            cw = u.copy().ravel()
-            for stage in range(1, int(math.log2(N_POLAR)) + 1):
-                sep = N_POLAR // (1 << stage)
-                for j in range(N_POLAR):
-                    if (j // sep) % 2 == 0:
-                        cw[j] = (cw[j] + cw[j + sep]) % 2
-            return cw
-        info = (rng.rand(K_POLAR) < 0.5).astype(np.int64)
-        u = np.zeros(N_POLAR, dtype=np.int64)
-        u[FROZEN_MASK.astype(bool)] = info
-        coded = _polar_encode(u)
-        from tools.loopback_capture import build_frame, rrc_pulse
-        frame_syms = build_frame(coded, frame_id, stf_syms, pss_syms, rs_syms)
-        tx_iq = rrc_pulse(frame_syms, RRC, SPS).astype(np.complex64)
-    else:
-        raw = rng.randint(0, 2, PAYLOAD_LEN).astype(np.int64)
-        frame_syms = build_custom_frame(raw, frame_id, stf_syms, pss_syms, rs_syms)
-        tx_iq = rrc_filter(frame_syms, RRC, SPS).astype(np.complex64)
+    tx_iq, _, frame_syms = _reconstruct_polar_frame(
+        rng, frame_id, stf_syms, pss_syms, rs_syms)
 
     # 搜索窗口: expected_offset 前后各 margin 样本
     margin = 400
@@ -711,7 +650,7 @@ def main():
     p.add_argument('--fixed-nf', type=float, default=None,
                    help='固定底噪 dB (如 -70), 默认 None=实测')
     p.add_argument('--plot', action='store_true',
-                   help='绘制原始接收 I/Q 波形并标出 repeat frame 位置')
+                   help='绘制原始接收 I/Q 波形并标出重复帧位置')
     p.add_argument('--save-plot', default='',
                    help='保存 I/Q 波形图; 多 capture 时建议传目录')
     p.add_argument('--plot-samples', type=int, default=5000,

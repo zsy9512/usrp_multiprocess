@@ -3,12 +3,12 @@
 """
 polar_offline_decode.py — 离线极化译码 + BER (从 capture 读取)
 
-帧结构 (长前导 Polar):
+帧结构 (Polar 重复帧):
   STF(128) + PSS(64) + RS(64) + Header(32) + Payload(256) + CRC(16) + Guard(32) = 592 sym
 
 工作流:
   1. 全帧互相关定位第一帧 → 组时序推算
-  2. 逐帧 STF 扫描 → PSS → RS (长 64 符号, 处理增益 3dB 高于 32)
+  2. 逐帧 PSS 定时 → RS 信道估计
   3. RS 信道估计 → LLR 软解调 Payload
   4. Hard Inverse Polar 变换 → 信息比特 → BER vs TX info
 
@@ -25,7 +25,6 @@ sys.path.insert(0, BASE)
 from phy_params import (SPS, PSS as PSS_REF, RRC,
                         PSS_LEN, HEADER_LEN, PAYLOAD_LEN, PAYLOAD_CRC_LEN,
                         GUARD_SYMBOLS, RRC_DELAY_SAMPLES)
-from polar_mask import load_frozen_mask
 
 SAMP_RATE = 1e6
 TS_SYM = SPS / SAMP_RATE
@@ -33,7 +32,9 @@ N_POLAR = 256
 K_POLAR = 128
 REPEAT = 5
 
-FROZEN_MASK = load_frozen_mask(BASE)
+FROZEN_MASK = np.load(
+    os.path.join(BASE, 'deploy', 'matrices', 'A.npy')
+).astype(np.int64).squeeze()
 LLR_CLIP = 20.0
 
 
@@ -183,7 +184,7 @@ def decode_capture(prefix, num_frames=100, sgnn_model=None, sgnn_graph=None,
         with open(meta_path, encoding='utf-8') as f:
             meta = json.load(f)
 
-    # 帧结构参数 (从 meta 或默认长前导 Polar 配置)
+    # 帧结构参数 (从 meta 或默认 Polar 重复帧配置)
     stf_reps = meta.get('stf_syms', 128) // 16
     rs_len = meta.get('rs_syms', 64)
     gap_group_ms = meta.get('frame_gap_ms', 30.0)
