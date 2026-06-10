@@ -43,6 +43,7 @@ External interference:
 ```text
 .
 |-- README.md
+|-- environment.yml
 |-- burst_interferer.py
 |-- phy_params.py
 |-- deploy/
@@ -61,6 +62,22 @@ External interference:
 ```
 
 `capture/`、`plots/` 和 `__pycache__/` 是运行输出目录，不应提交。`deploy/` 是运行资产目录，包含 SGNN checkpoint 和矩阵文件。
+
+## 环境安装
+
+`environment.yml` 从 `pyg_test_py310` 导出，用于 Conda 迁移安装。推荐在目标机器创建独立环境：
+
+```powershell
+conda env create -n offline-polar-loopback -f environment.yml
+```
+
+安装后激活环境：
+
+```powershell
+conda activate offline-polar-loopback
+```
+
+如果目标机器的 CUDA/PyTorch/PyG wheel 源不可用，先完成 Conda 环境创建，再按目标 CUDA 版本补装 `torch`、`torch-geometric` 和相关 PyG wheel。
 
 ## 文件说明
 
