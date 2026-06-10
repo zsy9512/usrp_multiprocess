@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+capture/
+deploy/checkpoint/
+deploy/matrices/
+
+*.npy
+*.pt
+*.bin
+*.png
