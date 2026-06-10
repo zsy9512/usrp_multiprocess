@@ -43,7 +43,6 @@ External interference:
 ```text
 .
 |-- README.md
-|-- environment.yml
 |-- burst_interferer.py
 |-- phy_params.py
 |-- deploy/
@@ -65,19 +64,45 @@ External interference:
 
 ## 环境安装
 
-`environment.yml` 从 `pyg_test_py310` 导出，用于 Conda 迁移安装。推荐在目标机器创建独立环境：
+Ubuntu 22.04 + CUDA 12.6 推荐使用最小 Conda 环境。SGNN 推理只依赖 `torch`，UHD 由 conda-forge 安装，不需要 `torch-geometric`、`torch-scatter`、TensorFlow 或 Sionna。
 
-```powershell
-conda env create -n offline-polar-loopback -f environment.yml
-```
+创建环境：
 
-安装后激活环境：
-
-```powershell
+```bash
+conda create -n offline-polar-loopback python=3.10 pip numpy matplotlib -y
 conda activate offline-polar-loopback
 ```
 
-如果目标机器的 CUDA/PyTorch/PyG wheel 源不可用，先完成 Conda 环境创建，再按目标 CUDA 版本补装 `torch`、`torch-geometric` 和相关 PyG wheel。
+配置 conda-forge 镜像并安装 UHD：
+
+```bash
+conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/
+conda config --set channel_priority strict
+conda install uhd -y
+```
+
+安装 CUDA 12.6 版 PyTorch：
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+验证环境：
+
+```bash
+python - <<'PY'
+import numpy
+import matplotlib
+import torch
+import uhd
+
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("torch cuda:", torch.version.cuda)
+print("uhd ok")
+PY
+```
 
 ## 文件说明
 
