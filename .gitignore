@@ -2,10 +2,13 @@ __pycache__/
 *.py[cod]
 
 capture/
-deploy/checkpoint/
-deploy/matrices/
 
 *.npy
 *.pt
 *.bin
 *.png
+
+!deploy/checkpoint/
+!deploy/checkpoint/*.pt
+!deploy/matrices/
+!deploy/matrices/*.npy
